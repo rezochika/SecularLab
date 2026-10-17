@@ -1,0 +1,40 @@
+#pragma once
+#include "secular/exact.hpp"
+#include <functional>
+
+namespace secular {
+    struct Options {
+        unsigned digits=50;
+        unsigned precision=256;
+        // decimal working precision, candidate stage only
+        unsigned max_precision=2048;
+        unsigned max_squarings=128;
+        bool full_coefficient_check=true;
+        bool check_squarefree=true;
+        std::function<void(const std::string&)> progress;
+    };
+    struct RootCertificate {
+        std::size_t index {};
+        // 0 = largest eigenvalue
+        Q lower,upper,radius;
+        std::string decimal;
+    };
+    struct SolveResult {
+        bool certified=false;
+        std::string status="NOT_CERTIFIED",message;
+        std::vector<RootCertificate> roots;
+        std::vector<Z> coefficients;
+        Z determinant_scale;
+        // det(zE-F)=scale^n det(zM-K)
+        std::size_t order {},exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
+        unsigned working_digits {},graeffe_steps {},attempts {};
+        bool coefficient_identity_verified=false;
+        double coefficients_seconds {},oracle_seconds {},graeffe_seconds {},certification_seconds {},total_seconds {};
+    };
+    void validate_options(const Options& options);
+    SolveResult solve(const QMatrix& stiffness,const QMatrix& mass,const Options& options);
+    bool verify_root_certificates(const QMatrix& stiffness,const QMatrix& mass,const std::vector<RootCertificate>& roots,unsigned digits);
+    void write_certificates(std::ostream& out,const std::vector<RootCertificate>& roots,unsigned digits);
+    std::vector<RootCertificate> read_certificates(std::istream& in,unsigned& digits);
+    void write_result_json(std::ostream& out,const SolveResult& r,unsigned digits);
+}

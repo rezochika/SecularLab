@@ -1,0 +1,46 @@
+{
+  "project": "SecularLab",
+  "version": "1.0.0",
+  "verified_in_this_delivery": true,
+  "release_build": true,
+  "debug_address_undefined_sanitizer_tests": true,
+  "relocated_archive_build": true,
+  "ctest_passed": 4,
+  "ctest_total": 4,
+  "native_core_assertions": 35,
+  "extended_exact_algebra_assertions": 599,
+  "cli_integration_checks": 35,
+  "external_matrix_files": 2,
+  "synthetic_matrix_files": 18,
+  "clion_shared_configurations": 7,
+  "oilrig_solve": {
+    "order": 66,
+    "certified_eigenvalues": 66,
+    "decimal_places": 50,
+    "working_decimal_digits": 256,
+    "graeffe_squarings": 22,
+    "coefficient_oracle": true,
+    "coefficient_bits_max": 6707,
+    "solve_seconds": 150.100153914,
+    "peak_rss_KiB": 14968
+  },
+  "oilrig_separate_certificate_replay": true,
+  "independent_scipy_binary64_comparison": true,
+  "independent_mpmath_100_digit_numerical_comparison": true,
+  "reference_comparison_scope": "Numerical corroboration only. Rigorous acceptance is native exact inertia and decimal rounding; reference solvers supply no Graeffe seeds.",
+  "not_executed": [
+    "CLion GUI",
+    "Windows build",
+    "macOS build",
+    "formal verification"
+  ],
+  "candidate_backend": "Boost.Multiprecision GMP float",
+  "exact_backend": "GMP integers and rationals",
+  "tested_source_hashes": {
+    "src/solver.cpp": "349802fa137618247d8abb12c0e5a614a16053919149f1739e7397be08aac546",
+    "src/exact.cpp": "4e1f537e3e405a2d775e111d264d11d6bd35e2bffb8e6625fb2f048536bb8cef",
+    "src/main.cpp": "8fa8fd021a9cf3a1d131b7031656166d2b2f1c2415334dab12738e037471eef6",
+    "include/secular/exact.hpp": "c242d3277c2b5936df68a04b23e8018a8b1939b4ae0c3b55815a001735a42b07",
+    "include/secular/solver.hpp": "a6e33d213bd5ef4d394bc1eefd6ecd48fa4ba5ec62cd79ae2b4eaa914b3aa9b7"
+  }
+}

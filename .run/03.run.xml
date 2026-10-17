@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="03 - Verify oil rig saved certificates" type="CMakeRunConfiguration" factoryName="Application" PROGRAM_PARAMS="verify --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --cert results/oilrig50/eigenvalues.tsv" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" WORKING_DIR="$PROJECT_DIR$" PASS_PARENT_ENVS_2="true" PROJECT_NAME="Project" TARGET_NAME="secular">
+    <method v="2">
+      <option name="com.jetbrains.cidr.execution.CidrBuildBeforeRunTaskProvider$BuildBeforeRunTask" enabled="true" />
+    </method>
+  </configuration>
+</component>

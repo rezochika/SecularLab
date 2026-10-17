@@ -1,0 +1,10 @@
+/mnt/data/secular-build/secular
+solve
+--matrix
+/mnt/data/SecularLab/matrices/oilrig/bcsstk02.mtx
+--mass
+/mnt/data/SecularLab/matrices/oilrig/bcsstm02.mtx
+--digits
+50
+--out
+/mnt/data/SecularLab/verification/oilrig50

@@ -1,0 +1,11 @@
+{
+  "scope": "Independent SciPy binary64 comparison only; not a certificate of 50 digits",
+  "passed": true,
+  "eigenvalue_count": 66,
+  "max_scaled_value_difference": 1.6308071509047876e-13,
+  "max_relative_reference_residual": 4.570870371490081e-16,
+  "scipy_eigh_kernel_seconds": 0.0042561669997667195,
+  "python": "3.13.5",
+  "numpy": "2.3.5",
+  "scipy": "1.17.0"
+}

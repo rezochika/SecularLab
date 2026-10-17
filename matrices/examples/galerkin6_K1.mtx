@@ -1,0 +1,12 @@
+%%MatrixMarket matrix coordinate real symmetric
+% Synthetic regression case: OPM Legendre basis, K(t)=K0+t*K1, M=H
+% Fraction tokens are a documented SecularLab extension to Matrix Market.
+6 6 8
+2 1 -4/7
+3 2 -2/9
+4 1 6/35
+4 3 -8/55
+5 2 8/63
+5 4 -10/91
+6 3 10/99
+6 5 -4/45

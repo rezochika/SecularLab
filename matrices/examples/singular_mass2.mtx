@@ -1,0 +1,5 @@
+%%MatrixMarket matrix coordinate real symmetric
+% Synthetic regression case: singular leading matrix must be rejected
+% Fraction tokens are a documented SecularLab extension to Matrix Market.
+2 2 1
+2 2 1

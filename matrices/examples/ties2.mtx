@@ -1,0 +1,6 @@
+%%MatrixMarket matrix coordinate real symmetric
+% Synthetic regression case: positive exact decimal ties 0.25,2.25
+% Fraction tokens are a documented SecularLab extension to Matrix Market.
+2 2 2
+1 1 1/4
+2 2 9/4

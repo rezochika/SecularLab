@@ -1,0 +1,7 @@
+%%MatrixMarket matrix coordinate real symmetric
+% Synthetic regression case: eigenvalues 3,1
+% Fraction tokens are a documented SecularLab extension to Matrix Market.
+2 2 3
+1 1 2
+2 1 1
+2 2 2

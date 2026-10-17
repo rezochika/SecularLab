@@ -1,0 +1,13 @@
+Test project /mnt/data/SecularLab/build/release
+    Start 1: exact_and_certified_regression
+1/4 Test #1: exact_and_certified_regression ...   Passed    0.00 sec
+    Start 2: extended_exact_algebra
+2/4 Test #2: extended_exact_algebra ...........   Passed    0.01 sec
+    Start 3: cli_and_matrix_integration
+3/4 Test #3: cli_and_matrix_integration .......   Passed    0.92 sec
+    Start 4: matrix_file_integrity
+4/4 Test #4: matrix_file_integrity ............   Passed    0.72 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   1.67 sec

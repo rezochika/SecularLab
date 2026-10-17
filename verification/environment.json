@@ -1,0 +1,20 @@
+{
+  "exe_sha256": "e2766be162bc2acd953da6b3f073db3966a0076ca90092f2fb68e438eb2f6fba",
+  "sources_sha256": {
+    "src/solver.cpp": "349802fa137618247d8abb12c0e5a614a16053919149f1739e7397be08aac546",
+    "src/exact.cpp": "4e1f537e3e405a2d775e111d264d11d6bd35e2bffb8e6625fb2f048536bb8cef",
+    "src/main.cpp": "8fa8fd021a9cf3a1d131b7031656166d2b2f1c2415334dab12738e037471eef6",
+    "include/secular/exact.hpp": "c242d3277c2b5936df68a04b23e8018a8b1939b4ae0c3b55815a001735a42b07",
+    "include/secular/solver.hpp": "a6e33d213bd5ef4d394bc1eefd6ecd48fa4ba5ec62cd79ae2b4eaa914b3aa9b7"
+  },
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "python": "3.13.5",
+  "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+  "cmake": "cmake version 3.31.6",
+  "boost": "1.83",
+  "gmp": "6.3.0",
+  "build": "Release",
+  "native_graphical_clion_tested": false,
+  "windows_build_tested": false,
+  "macos_build_tested": false
+}

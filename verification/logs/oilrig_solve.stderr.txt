@@ -1,0 +1,27 @@
+Computing exact characteristic coefficients...
+Checking polynomial at n+1 independent Bareiss determinants...
+Graeffe candidate pass at 256 decimal working digits...
+Testing exact inertia and decimal rounding after 22 squarings...
+	Command being timed: "/mnt/data/secular-build/secular solve --matrix /mnt/data/SecularLab/matrices/oilrig/bcsstk02.mtx --mass /mnt/data/SecularLab/matrices/oilrig/bcsstm02.mtx --digits 50 --out /mnt/data/SecularLab/verification/oilrig50"
+	User time (seconds): 150.04
+	System time (seconds): 0.00
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:30.10
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 14968
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 4916
+	Voluntary context switches: 1
+	Involuntary context switches: 399
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 536
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

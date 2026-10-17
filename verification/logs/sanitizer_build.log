@@ -1,0 +1,9 @@
+[1/9] Building CXX object CMakeFiles/secular_core.dir/src/exact.cpp.o
+[2/9] Building CXX object CMakeFiles/secular.dir/src/main.cpp.o
+[3/9] Building CXX object CMakeFiles/secular_core.dir/src/solver.cpp.o
+[4/9] Linking CXX static library libsecular_core.a
+[5/9] Building CXX object CMakeFiles/secular_tests.dir/tests/test_core.cpp.o
+[6/9] Linking CXX executable secular
+[7/9] Linking CXX executable secular_tests
+[8/9] Building CXX object CMakeFiles/secular_algebra_tests.dir/tests/test_algebra.cpp.o
+[9/9] Linking CXX executable secular_algebra_tests
