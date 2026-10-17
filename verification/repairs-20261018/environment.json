@@ -1,0 +1,155 @@
+{
+  "schema": "SecularLab-repair-verification-1",
+  "recorded_at_utc": "2026-10-17T20:22:21.4977022Z",
+  "record_directory": "verification/repairs-20261018",
+  "branch": "codex/fix-certification-windows",
+  "base_HEAD": "c7bd757f2ffbd31d7f9f6231771a1ec5bd33924e",
+  "fingerprint_scope": "Current working-tree bytes; these fingerprints are not a commit or proof of a clean checkout.",
+  "sources_sha256": {
+    "src/solver.cpp": "180b9b4038401ba46a0d210f20a4e19fb4568c3071c8f51d8297150a5f8f486c",
+    "src/exact.cpp": "3f3d729b91269097b18fd5359c7fda8cd36140bb8a794497475132ef97d2a68c",
+    "src/main.cpp": "8fa8fd021a9cf3a1d131b7031656166d2b2f1c2415334dab12738e037471eef6",
+    "include/secular/exact.hpp": "c242d3277c2b5936df68a04b23e8018a8b1939b4ae0c3b55815a001735a42b07",
+    "include/secular/solver.hpp": "a6e33d213bd5ef4d394bc1eefd6ecd48fa4ba5ec62cd79ae2b4eaa914b3aa9b7"
+  },
+  "changed_or_new_tests_sha256": {
+    "tests/test_core.cpp": "afba844fc574c249ec28b042e4c7997ec3c161bc68fddfc1dab74829c8cb19ea",
+    "tests/test_recovery.cpp": "2422dc5ae2bac44617415e87ad3dc7b75a0ac4f64ee50bff10cee61817be81d5"
+  },
+  "build_support_sha256": {
+    "CMakeLists.txt": "30c490fdd63f5373cab99cfeaeac3fb7baeb3f462612cfffb8fb1ccad07c8688",
+    "tools/setup-clion-deps.ps1": "0d4f482b29bef4794407c822aa1f14e67fdb48dbb5f5f1319b7398da0cdf5e0e",
+    "tools/setup-clion-deps.sh": "a498e6589f09c9de1d5a4155f582e6e10fe3d99a50a1981865e685aa2c37b09e",
+    ".run/08.run.xml": "cfc786576e94b7c6fff7d8bacc75a3091af80128607f736c22dbb10982c0fc0a",
+    ".run/07.run.xml": "23907d96afa41e0408145014df886aef9017526e505b112ed27b8bae48bfd27e",
+    ".run/06.run.xml": "b97236fa0d62309a9df32d745f357502496dfa6eb39aa48e07fe3881dd3fc906",
+    ".run/05.run.xml": "7f2ec9951c74bf229e266a87fb61a14b6452ba45fe9b0b7fe4ceb8daf87afa53",
+    ".run/04.run.xml": "cc19d068a211c0babcc6758d395b7eb919f9176eaabcb61781b233bfc8ac308f",
+    ".run/03.run.xml": "7753643dc47aa7713a2b469ea93996e727f455f01cd140e0c699d973850b4cc1",
+    ".run/02.run.xml": "0a221e3b050821d599dcaa7ca986baac73e3be1a6e8c6b89dd8a289486caba80",
+    ".run/01.run.xml": "20a3526b52772e41099c58461729ab998f46dec21660cc057da01b63aef553d5",
+    "docs/WINDOWS_SETUP.md": "1927e86f95c82723072905c2adeb77d1b9aa9000357b60aeb31f5398931de41a"
+  },
+  "native_executable": {
+    "path": "build/windows-clion/secular.exe",
+    "sha256": "a08f4462660d101f2b195a84eaf8ba5a30781a50b90e2a3b7bc649568d2aed92"
+  },
+  "windows": {
+    "platform": "Windows x86_64",
+    "compiler": "CLion 2026.1 bundled GCC 15.2.0, x86_64-w64-mingw32, MSVCRT",
+    "gmp": "6.3.0",
+    "boost": "1.90.0",
+    "gmp_C_library": "Bundled static libgmp.a; not rebuilt",
+    "gmp_CXX_library": "11 upstream 6.3.0 wrapper sources built with the same GCC",
+    "release_ctest": "5/5 passed, 0.96 s",
+    "debug_ctest": "5/5 passed, 1.17 s",
+    "upstream_GMP_full_test_suite_run": false,
+    "clion_gui": {
+      "status": "completed",
+      "completed": true,
+      "evidence_type": "Parent-observed CLion UI; written observation record and solver result JSON, no archived screenshots.",
+      "evidence": "logs/clion-ui-observations.txt",
+      "configure": "Release and Debug profiles successfully configured in CLion.",
+      "run": "Shared 01 small SPD solver selected; original XML required manual executable selection. Run returned CERTIFIED 3/3, 50 decimal places, 10 Graeffe squarings, exit 0.",
+      "build": "With shared 01 explicitly selected, Ctrl+F9 invoked cmake --build .../build/windows-clion --target secular -j 30. Ninja reported no work; no errors.",
+      "configuration_correction": "Shared 01-07 XMLs now include project-name and executable-target attributes; added 08 recovery configuration. The original 01 filename was restored after UI renaming.",
+      "result_path": "clion-spd3/result.json",
+      "result_sha256": "e73006e366bec09e47e44d7ddc266d7412f3fc81e4dd10efbbc1833e0d2f8495",
+      "incidental_dashboard_operation": "After external run-configuration reload, an unintended Continuous dashboard target was briefly selected. It fetched Git with HEAD unchanged, passed 5/5 tests, failed submission to invalid http://, and was stopped. No valid dashboard submission endpoint configured; no successful submission observed. Excluded from the normal GUI build success claim.",
+      "preserved_small_result": "results/spd3-clion-verified/result.json"
+    },
+    "dependency_setup": {
+      "command": "pwsh -NoProfile -File ./tools/setup-clion-deps.ps1 -ClionRoot 'C:/Program Files/JetBrains/CLion 2026.1'",
+      "result": "Exit 0; bundled GMP ABI and GMP C++/Boost smoke checks passed; existing user presets preserved.",
+      "gmpxx_sha256": "c9bd9bc85c47979bb3853f5873ca3a0c35868c6a87a44f87323162d44747f6d5",
+      "matches_dependency_used_for_application_tests": true
+    }
+  },
+  "linux": {
+    "environment": "Disposable Docker container secularlab-fixes on WSL2",
+    "compiler": "GCC 12.2.0 (Debian 12.2.0-14+deb12u1)",
+    "cmake": "3.25.1",
+    "boost": "1.74.0",
+    "boost_package": "libboost-dev 1.74.0.3",
+    "gmp": "6.2.1",
+    "gmp_package": "libgmp-dev 2:6.2.1+dfsg1-1.1",
+    "release_ctest": "5/5 passed, 0.39 s",
+    "debug_ASAN_UBSAN_ctest": "5/5 passed, 0.86 s",
+    "sanitizer_configure_only_flags": [
+      "-fno-pie",
+      "-no-pie"
+    ],
+    "initial_default_PIE_sanitizer_run": "Recovery test emitted runaway AddressSanitizer:DEADLYSIGNAL and timed out after 180 s; not a passing run.",
+    "toy_PIE": {
+      "runs": 30,
+      "passed": 25,
+      "runaway_diagnostics_terminated_by_1MiB_file_cap": 5
+    },
+    "toy_non_PIE": {
+      "runs": 100,
+      "passed": 100
+    },
+    "sanitizer_inference": "Toy reproduction supports an environment-dependent PIE sanitizer runtime startup issue. Exact kernel/runtime cause is unproven. Project CMake was not modified to apply the local validation flags.",
+    "upstream_GMP_full_test_suite_run": false
+  },
+  "oilrig": {
+    "order": 66,
+    "certified_eigenvalues": 66,
+    "decimal_places": 50,
+    "graeffe_squarings": 22,
+    "working_decimal_digits": 256,
+    "precision_attempts": 1,
+    "total_seconds": 115.6921462,
+    "separate_certificate_replay": "VERIFIED 66 eigenvalue certificates, 50 decimal places",
+    "archival_comparison": "All 66 decimal fields and exact coefficients match; coefficient text line endings normalized.",
+    "current_result_files_sha256": {
+      "results/oilrig50-windows-fixed/coefficients.tsv": "154b39286c79cfda90b49bb30265379b4ce7c81c9aa533d333e151c881936fc8",
+      "results/oilrig50-windows-fixed/command.txt": "1f8d41e978bcf6613884d61cb7fe7610b6689ec450b696db64d1222765550d69",
+      "results/oilrig50-windows-fixed/eigenvalues.tsv": "bd52fccb0faa65576fa405a846b59b864fee215d0fc57560dca368b3a5beb33a",
+      "results/oilrig50-windows-fixed/input_K.mtx": "f5bcca2b78d3cde69036471c3581e650baeb86e3e48f7d877a6e94d833446b5a",
+      "results/oilrig50-windows-fixed/input_M.mtx": "ee1b6b3dac5c1e6c0f9ef8eea6c6095e46be3b198ddc6d75458a716fd1a19d75",
+      "results/oilrig50-windows-fixed/result.json": "01ba454bc2961d552931b2b6de885444dea51019a497a4c3ceca0701662b99e6"
+    },
+    "coefficient_and_input_files": "Referenced and hashed in results/oilrig50-windows-fixed; not duplicated in this evidence directory."
+  },
+  "preserved_original_verification_sha256": {
+    "verification/VERIFICATION.json": "f680d2ad416ed13b637a784bae2b91aae3f713f4d24ad41e5b2fe982ceadce0e",
+    "verification/reference_binary64.json": "8fb4f9bcbe0739143ab3f5f6c138ae95f3cc43675d94d2f1b654db93821e7b39",
+    "verification/reference_100_digits.json": "6cf77fa4f86326981b8a2f9be3c167cda9a295a3eeb494177395c253910b534c",
+    "verification/README.md": "db02be1c692455f21baa8be089abb0bf9b53e113906f456d80e71a8b88747476",
+    "verification/oilrig50/result.json": "2e149e8be94eb0eae5ff1a32e3aa3721491d5e8a6ea014ad763bb7dbd4a6a370",
+    "verification/oilrig50/input_M.mtx": "4edb0052bfbd0094910879a97802e7251c4c09b0bc2dee30479efe0e437f3aa9",
+    "verification/oilrig50/input_K.mtx": "cf35d80c5c4e30e6b2e5288f27551039234ca17ee44038383a889028653a4000",
+    "verification/oilrig50/eigenvalues.tsv": "94b189e03f70d29e9893454384ed9cd2261abdbf0de4a0bde6f54b984266bad4",
+    "verification/oilrig50/command.txt": "68deb31859b31cb1d0f25e54f4b01a1b06153fa04777f23141a2e6a5a0a16c5e",
+    "verification/oilrig50/coefficients.tsv": "08a364d96d5d9e54222882d4e6e5334f2b3bafce9b6d4b3b99854d06ba643648",
+    "verification/environment.json": "2a1f59d331e3e6bda87459baef28848c02ca10eaeba7dd3dac4ae4e5a26927a1",
+    "verification/logs/sanitizer_ctest.log": "b8f3b0390fda7a9ff33d8c1289a94edb906a2e0b27fe6eaa463e19cdb1344bec",
+    "verification/logs/sanitizer_build.log": "cada0f2dfc1ac7b04f745e45123bd584bd91e1a994758fb4141535b5547d5ae7",
+    "verification/logs/relocated_ctest.log": "94b4de6f01e504a5fbcd3dd2432e42ef5e63da7448875b465595a713ed6314e3",
+    "verification/logs/relocated_configure.log": "92e680371ab3f54ee88bab705f72f50ec714504d0230b5a6c6bcb6b815f4a126",
+    "verification/logs/relocated_build.log": "cada0f2dfc1ac7b04f745e45123bd584bd91e1a994758fb4141535b5547d5ae7",
+    "verification/logs/release_ctest.log": "e46839a8751dcd0caba0e6aaff999fe089dd6acc0828d9dd319513286ce4dc23",
+    "verification/logs/release_configure.log": "35acf732702e5850e9bf79fe9c186b1fea1a6d742a1970ae5fd2de57acebbe18",
+    "verification/logs/release_build.log": "cada0f2dfc1ac7b04f745e45123bd584bd91e1a994758fb4141535b5547d5ae7",
+    "verification/logs/reference_scipy.log": "f2c1c92fda1cdf5aff2c8563065a8e7f79aa6fb83b3048b8a4280e3251f591e1",
+    "verification/logs/reference_mpmath.log": "aa24f6377ee2b9ccee6ff3a0c5d810aeba41d2a4dac91338c8573129fdec3955",
+    "verification/logs/oilrig_solve.stdout.txt": "876bcd78ab15a175e974d83913da65f0a9ab96d91a88889cf9cbc145bd5a448d",
+    "verification/logs/oilrig_solve.stderr.txt": "5be4b89361666e720f7a6ea90f1fb5889d6b7c0d229434bb185ee27feb5f914c",
+    "verification/logs/oilrig_replay.stdout.txt": "ec8ef8adeb06e5455ca5d68474683e138c6ba89b97b600e6d6b7cf38355a10e6",
+    "verification/logs/oilrig_replay.stderr.txt": "531c6af0555868397111f3d2ccc94e456e3540f3aa1c83783d66e1c852b0806c",
+    "verification/logs/core_assertions.log": "160dea42b7ace99a24b4e85ac23da573a1479a7cb71583e60ac65ad49f004f56",
+    "verification/logs/cli_assertions.log": "c6f515f4a0de244679ec731dd1fc67cc7ffcf000291a9552c17ed90ed2645989",
+    "verification/logs/algebra_assertions.log": "52042c91dadd6e9a36da834287fc766353535dc6785579f5170ebb7801f6ef88"
+  },
+  "limitations": [
+    "No full upstream GMP test suite run.",
+    "Certificate replay shares the implementation exact-inertia routine; it is a separate invocation, not an independently authored proof checker.",
+    "One oilrig timing sample is not a controlled performance benchmark.",
+    "No new SciPy or mpmath reference solve was performed for this repair record.",
+    "No Windows sanitizer or macOS build is claimed.",
+    "CLion GUI evidence is a parent-observed UI record with a saved solver result; screenshots are not archived, and no claim is made that every shared run configuration was executed."
+  ],
+  "gui_update_recorded_at_utc": "2026-10-17T20:25:12.3758626Z",
+  "evidence_text_line_endings": "Saved text evidence uses Git-canonical LF line endings. Hashes of results/ files refer to the original native run files."
+}

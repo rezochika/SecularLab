@@ -1,0 +1,10 @@
+C:\Users\rezoc\CLionProjects\SecularLab\build\windows-clion\secular.exe
+solve
+--matrix
+matrices/oilrig/bcsstk02.mtx
+--mass
+matrices/oilrig/bcsstm02.mtx
+--digits
+50
+--out
+results/oilrig50-windows-fixed

@@ -1,0 +1,17 @@
+ninja: no work to do.
+Internal ctest changing into directory: /tmp/recovery-fix/cmake
+Test project /tmp/recovery-fix/cmake
+    Start 1: exact_and_certified_regression
+1/5 Test #1: exact_and_certified_regression ...   Passed    0.00 sec
+    Start 2: extended_exact_algebra
+2/5 Test #2: extended_exact_algebra ...........   Passed    0.01 sec
+    Start 3: clustered_and_scaled_recovery
+3/5 Test #3: clustered_and_scaled_recovery ....   Passed    0.04 sec
+    Start 4: cli_and_matrix_integration
+4/5 Test #4: cli_and_matrix_integration .......   Passed    0.28 sec
+    Start 5: matrix_file_integrity
+5/5 Test #5: matrix_file_integrity ............   Passed    0.06 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   0.39 sec

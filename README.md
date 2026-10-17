@@ -14,7 +14,11 @@ The full published **BCSSTK02 / BCSSTM02 66 x 66 oil-rig pair is included**, alo
 
 ## Start in CLion
 
-### Windows: recommended MSYS2 UCRT64 toolchain
+### Windows: CLion bundled MinGW
+
+The current Windows checkout uses CLion's bundled MinGW compiler with project-local GMP C++ and Boost dependencies. See [Windows setup](docs/WINDOWS_SETUP.md) for the reproducible setup command and the `windows-clion` Release and `windows-clion-debug` profiles. Both native configurations pass the five standard test groups. CLion's build action and the small example were also exercised successfully.
+
+### Windows: alternative MSYS2 UCRT64 toolchain
 
 Install MSYS2, open its **UCRT64** terminal, update packages as directed by MSYS2, and install:
 
@@ -56,11 +60,11 @@ cmake --build build/release --parallel
 ctest --test-dir build/release --output-on-failure
 ```
 
-In CLion use the same Homebrew prefix in a local CMake profile. Linux builds and tests were executed for this delivery. **The Windows/macOS directions and CLion GUI configurations have not been executed here.**
+In CLion use the same Homebrew prefix in a local CMake profile. Linux and Windows builds have been tested. The macOS and alternative MSYS2 configurations have not been executed here. The original delivery records remain under `verification/`; current repair validation is recorded separately.
 
 ## Commands
 
-Run from the project root. The Linux/macOS executable is `build/release/secular`; the Windows preset builds `build/windows-ucrt64/secular.exe`.
+Run from the project root. The Linux/macOS executable is `build/release/secular`; the bundled CLion Windows preset builds `build/windows-clion/secular.exe` (MSYS2: `build/windows-ucrt64/secular.exe`).
 
 ### Complete oil-rig test
 
@@ -139,7 +143,7 @@ The certificate refers to the matrix whose published entries are interpreted as 
 ctest --preset release --output-on-failure
 ```
 
-The standard suite runs exact arithmetic/certificate tests, additional exact-algebra checks, CLI tests over the included examples, and byte-integrity checks of both external matrices. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
+The five standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, CLI examples, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, and disjoint certificates for tiny roots. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
 
 Optional slow full-matrix solve plus certificate replay:
 
@@ -149,7 +153,7 @@ cmake --build build/long --parallel
 ctest --test-dir build/long -L slow --output-on-failure
 ```
 
-The tested external problem produced **66 certified roots at 50 decimal places, after 22 Graeffe squarings using 256 working decimal digits**. Exact coefficient construction and the `n+1`-point determinant check passed. See `verification/README.md` for the measured environment, timing boundaries, fresh test results and saved certificate. These are execution observations, not a speed comparison with another solver.
+The tested external problem produced **66 certified roots at 50 decimal places, after 22 Graeffe squarings using 256 working decimal digits**. Exact coefficient construction and the `n+1`-point determinant check passed. See `verification/README.md` for the original delivery and [the repair verification record](verification/repairs-20261018/REPORT.txt) for the current Windows/Linux tests and native Windows oil-rig solve/replay. These are execution observations, not a speed comparison with another solver.
 
 ## Project layout
 

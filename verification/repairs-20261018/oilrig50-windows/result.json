@@ -1,0 +1,20 @@
+{
+  "schema": "SecularLab-1",
+  "status": "CERTIFIED",
+  "message": "All eigenvalues isolated, indexed and correctly rounded by exact inertia.",
+  "certified": true,
+  "order": 66,
+  "decimal_places": 50,
+  "working_decimal_digits": 256,
+  "graeffe_squarings": 22,
+  "precision_attempts": 1,
+  "exact_divisions": 287562,
+  "coefficient_bits_max": 6707,
+  "recurrence_workspace_bits_max": 6699,
+  "coefficient_identity_verified": true,
+  "certified_eigenvalues": 66,
+  "times_seconds": {"coefficients": 2.7941503, "coefficient_oracle": 13.7948631, "graeffe": 0.2533945, "certification": 89.6237119, "total": 115.6921462},
+  "denominator_clearing_multiplier": "2000000000000000000000000000",
+  "gmp_version": "6.3.0",
+  "candidate_backend": "Boost.Multiprecision GMP float (untrusted)"
+}

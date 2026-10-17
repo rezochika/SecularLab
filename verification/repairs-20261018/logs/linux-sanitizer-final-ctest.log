@@ -1,0 +1,22 @@
+[1/6] Building CXX object CMakeFiles/secular_core.dir/src/solver.cpp.o
+[2/6] Linking CXX static library libsecular_core.a
+[3/6] Linking CXX executable secular_tests
+[4/6] Linking CXX executable secular
+[5/6] Linking CXX executable secular_algebra_tests
+[6/6] Linking CXX executable secular_recovery_tests
+Internal ctest changing into directory: /tmp/sanitizer-review/build
+Test project /tmp/sanitizer-review/build
+    Start 1: exact_and_certified_regression
+1/5 Test #1: exact_and_certified_regression ...   Passed    0.02 sec
+    Start 2: extended_exact_algebra
+2/5 Test #2: extended_exact_algebra ...........   Passed    0.07 sec
+    Start 3: clustered_and_scaled_recovery
+3/5 Test #3: clustered_and_scaled_recovery ....   Passed    0.06 sec
+    Start 4: cli_and_matrix_integration
+4/5 Test #4: cli_and_matrix_integration .......   Passed    0.65 sec
+    Start 5: matrix_file_integrity
+5/5 Test #5: matrix_file_integrity ............   Passed    0.05 sec
+
+100% tests passed, 0 tests failed out of 5
+
+Total Test time (real) =   0.86 sec
