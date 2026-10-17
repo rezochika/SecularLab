@@ -147,7 +147,13 @@ namespace secular {
             if(s[0]=='-')sign=-1;
             s.erase(0,1);
         }
-        if(s.empty() || s[0]=='+' || s[0]=='-')throw std::invalid_argument("invalid numeric sign");
+        bool has_digit=false,has_point=false;
+        for(unsigned char ch:s) {
+            if(std::isdigit(ch))has_digit=true;
+            else if(ch=='.'&&!has_point)has_point=true;
+            else throw std::invalid_argument("invalid numeric mantissa");
+        }
+        if(!has_digit)throw std::invalid_argument("missing mantissa digits");
         auto point=s.find('.');
         long places=0;
         if(point!=std::string::npos) {
@@ -436,7 +442,7 @@ namespace secular {
         return v;
     }
     bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c) {
-        if(c.size()!=e.n+1)return false;
+        if(e.n!=f.n||c.size()!=e.n+1)return false;
         for(std::size_t k=0;k<=e.n;++k) {
             Z x=-Z(static_cast<unsigned long>(k+1));
             ZMatrix a(e.n);

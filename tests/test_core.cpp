@@ -10,7 +10,7 @@ void require(bool b,const std::string& m) {
     ++count;
     if(!b)throw std::runtime_error(m);
 }
-template<class F> void rejected(F f) {
+template<class F> void rejected(F f,const std::string& message="expected exception") {
     bool yes=false;
     try {
         f();
@@ -18,7 +18,7 @@ template<class F> void rejected(F f) {
     catch(const std::exception&) {
         yes=true;
     }
-    require(yes,"expected exception");
+    require(yes,message);
 }
 int main() {
     try {
@@ -26,6 +26,19 @@ int main() {
         require(parse_rational(".75")==Q(3,4),"dyadic parse");
         require(parse_rational("1/-2")==Q(-1,2),"negative denominator");
         require(parse_rational("2D3")==2000,"Fortran exponent");
+        for(const auto& [token,expected]:std::vector<std::pair<std::string,Q>> {
+            {"+12",Q(12)},{"-12",Q(-12)},
+            {"+.75",Q(3,4)},{"-.75",Q(-3,4)},
+            {"+1.",Q(1)},{"-1.",Q(-1)},
+            {"+.75E+2",Q(75)},{"-.75d-2",Q(-3,400)},
+            {"+1.e-2",Q(1,100)},{"-1.D+2",Q(-100)}
+        })require(parse_rational(token)==expected,"signed rational parse: "+token);
+        for(const std::string token: {
+            ".-1",".+1","-.-1","+.+1","-.+1","+.-1",
+            ".-1e2",".+1E-2","-.-1d+2","+.+1D2","1.-2","1.+2"
+        })rejected([&] {
+            parse_rational(token);
+        },"reject misplaced mantissa sign: "+token);
         for(auto s: {
             "1/0","nan","1.2.3","2e","--2","e9","1/2/3"
         })rejected([&] {
@@ -55,6 +68,10 @@ int main() {
             1,-4,3
         }),"Faddeev coefficients");
         require(cp.terminal_zero && verify_coefficients(e,a,cp.coefficients),"independent determinant oracle");
+        require(!verify_coefficients(identity<Z>(1),identity<Z>(2),{1,-1}),
+                "coefficient oracle rejects larger second matrix");
+        require(!verify_coefficients(identity<Z>(2),identity<Z>(1),{1,-2,1}),
+                "coefficient oracle rejects smaller second matrix");
         auto bad=cp.coefficients;
         bad.back()+=1;
         require(!verify_coefficients(e,a,bad),"reject bad coefficients");

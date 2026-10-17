@@ -85,14 +85,36 @@ namespace secular {
             }
             return roots;
         }
-        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,const std::vector<Z>& coefficients,const Real& candidate,std::size_t index,unsigned digits) {
-            Q approx=rational(candidate);
-            for(unsigned extra: {
-                8U,16U,32U
-            }) {
-                Q center(round_scaled(approx,digits+extra+8),pow10(digits+extra+8));
+        long decimal_scale(const Q& positive) {
+            // If this returns e, 10^(e-1) < positive < 10^(e+1).
+            // The estimate only sets UNTRUSTED proposal widths, never acceptance.
+            return static_cast<long>(positive.get_num().get_str().size())-
+                   static_cast<long>(positive.get_den().get_str().size());
+        }
+        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,const std::vector<Z>& coefficients,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work) {
+            if(approx<=0)return std::nullopt;
+            const long scale=decimal_scale(approx);
+            long places=std::max(static_cast<long>(digits)+8,9-scale);
+            if(separation>0)places=std::max(places,2-decimal_scale(separation));
+            // Resolve small roots and close neighbors independently of output
+            // decimal places. Working precision bounds adaptive refinement, but
+            // retain the original output-driven widths: an exact candidate can
+            // certify more decimal places than its floating working precision.
+            const long available=std::max(static_cast<long>(digits)+32,
+                                          static_cast<long>(work)-scale-16);
+            places=std::min(places,available);
+            long last=-1;
+            for(unsigned extra:{0U,8U,24U}) {
+                const long width_places=std::min(places+static_cast<long>(extra),available);
+                if(width_places==last)continue;
+                last=width_places;
+                // pow10 has an explicit resource limit; failure to propose an
+                // interval within it must remain an uncertified candidate.
+                if(width_places>99992)return std::nullopt;
+                const auto width=static_cast<unsigned>(width_places);
+                Q center(round_scaled(approx,width+8),pow10(width+8));
                 center.canonicalize();
-                Q radius(1,pow10(digits+extra));
+                Q radius(1,pow10(width));
                 Q lower=center-radius,upper=center+radius;
                 auto li=shifted_inertia(pencil.F,pencil.E,lower),ui=shifted_inertia(pencil.F,pencil.E,upper);
                 if(li.zero==1&&li.positive==index) {
@@ -122,10 +144,20 @@ namespace secular {
             }
             return std::nullopt;
         }
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,const std::vector<Z>& co,const std::vector<Real>& candidates,unsigned digits) {
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,const std::vector<Z>& co,const std::vector<Real>& candidates,unsigned digits,unsigned work) {
+            std::vector<Q> approximations;
+            for(const auto& candidate:candidates)approximations.push_back(rational(candidate));
             std::vector<RootCertificate> out;
             for(std::size_t i=0;i<candidates.size();++i) {
-                auto r=certify_one(p,co,candidates[i],i,digits);
+                if(approximations[i]<=0||(i&&approximations[i]>=approximations[i-1]))return {};
+                Q separation=0;
+                if(i)separation=approximations[i-1]-approximations[i];
+                if(i+1<approximations.size()) {
+                    Q gap=approximations[i]-approximations[i+1];
+                    if(gap<=0)return {};
+                    if(separation==0||gap<separation)separation=gap;
+                }
+                auto r=certify_one(p,co,approximations[i],separation,i,digits,work);
                 if(!r)return {};
                 out.push_back(std::move(*r));
             }
@@ -209,6 +241,7 @@ namespace secular {
                 const Real cutoff=-Real(work+10)*log(Real(10));
                 const Real threshold("1e-"+std::to_string(o.digits+16));
                 std::vector<Real> previous;
+                unsigned next_certification=0,certification_delay=2;
                 for(unsigned step=1;step<=o.max_squarings;++step) {
                     coeff=square_roots(coeff,cutoff);
                     out.graeffe_steps=step;
@@ -220,11 +253,11 @@ namespace secular {
                         if(stable&&abs(candidates[i]-previous[i])>threshold)stable=false;
                     }
                     previous=candidates;
-                    if(stable||step==o.max_squarings) {
+                    if((stable&&step>=next_certification)||step==o.max_squarings) {
                         out.graeffe_seconds+=elapsed(gt);
                         if(o.progress)o.progress("Testing exact inertia and decimal rounding after "+std::to_string(step)+" squarings...");
                         auto ct=Clock::now();
-                        auto roots=certify_all(p,out.coefficients,candidates,o.digits);
+                        auto roots=certify_all(p,out.coefficients,candidates,o.digits,work);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);
@@ -235,7 +268,12 @@ namespace secular {
                             return out;
                         }
                         gt=Clock::now();
-                        if(stable)throw PrecisionLoss("candidate stagnation did not pass exact certification; restarting with more precision");
+                        // Absolute candidate stability does not imply Graeffe
+                        // separation is complete (especially for tiny/clustered
+                        // roots). Continue squaring; geometrically space failed
+                        // certification attempts to bound costly exact checks.
+                        next_certification=step+certification_delay;
+                        certification_delay*=2;
                     }
                 }
                 out.graeffe_seconds+=elapsed(gt);
@@ -310,7 +348,7 @@ namespace secular {
             while(std::getline(row,s,'\t'))fields.push_back(s);
             if(fields.size()!=5)throw std::invalid_argument("invalid certificate row");
             auto ix=parse_rational(fields[0]);
-            if(ix.get_den()!=1||ix<0||ix>max_dimension)throw std::invalid_argument("invalid certificate index");
+            if(ix.get_den()!=1||ix<0||ix>static_cast<unsigned long>(max_dimension))throw std::invalid_argument("invalid certificate index");
             if(r.size()>=max_dimension)throw std::invalid_argument("too many certificate rows");
             r.push_back( {
                 static_cast<std::size_t>(ix.get_num().get_ui()),parse_rational(fields[2]),parse_rational(fields[3]),parse_rational(fields[4]),fields[1]

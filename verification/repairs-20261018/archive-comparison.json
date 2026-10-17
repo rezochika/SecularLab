@@ -1,0 +1,9 @@
+{
+  "native_result": "results/oilrig50-windows-fixed",
+  "archival_result": "verification/oilrig50",
+  "eigenvalue_count": 66,
+  "decimal_places": 50,
+  "all_decimal_fields_equal": true,
+  "exact_coefficient_file_equal_after_CRLF_to_LF": true,
+  "rational_interval_file_identity_not_claimed": true
+}

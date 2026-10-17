@@ -10,7 +10,8 @@ cmake --build --preset release --parallel
 ctest --preset release --output-on-failure
 ```
 
-On the supplied MSYS2 UCRT64 configuration, substitute `windows-ucrt64` for `release`.
+For CLion's bundled Windows compiler, follow [Windows setup](WINDOWS_SETUP.md) and substitute
+`windows-clion` for `release`. On MSYS2 UCRT64, substitute `windows-ucrt64`.
 Python 3 enables the extra CLI/data tests; the native C++ tests always build with BUILD_TESTING.
 Use the release's original matrix files and run the integrity script first:
 
@@ -23,8 +24,8 @@ python tools/check_matrices.py
 The existing shared run configuration has all arguments. Or, on Windows:
 
 ```powershell
-.\build\windows-ucrt64\secular.exe solve --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --digits 50 --out results/oilrig50-local
-.\build\windows-ucrt64\secular.exe verify --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --cert results/oilrig50-local/eigenvalues.tsv
+.\build\windows-clion\secular.exe solve --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --digits 50 --out results/oilrig50-local
+.\build\windows-clion\secular.exe verify --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --cert results/oilrig50-local/eigenvalues.tsv
 ```
 
 Expect CERTIFIED with 66 roots and a separate VERIFIED replay. Do not assert success merely

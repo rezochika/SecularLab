@@ -1,0 +1,31 @@
+CLion GUI observations supplied by the parent agent, 2026-10-18 local date
+
+This is a written UI observation record. Screenshots were not archived here.
+The author of this evidence update did not independently repeat the UI steps.
+
+The parent observed CLion Release and Debug profiles configure successfully.
+The shared 01 small SPD solver configuration was selected. Its original XML
+lacked project-name/executable-target metadata, so choosing the executable in
+the UI was required. Run produced CERTIFIED 3/3 eigenvalues at 50 decimal
+places, with 10 Graeffe squarings and process exit 0. The resulting JSON is
+copied to clion-spd3/result.json; the original was moved to results/spd3-clion-verified/result.json after validation
+so the shared example can run again into the available results/spd3 directory.
+
+With shared 01 explicitly selected, Ctrl+F9 invoked:
+  cmake --build .../build/windows-clion --target secular -j 30
+Ninja reported no work to do, followed by Build finished, with no build errors. This establishes the GUI
+build target and successful up-to-date build; it is not a claim of recompiling
+all source files during that specific keypress.
+
+The parent corrected shared configurations 01-07 to include project-name and
+executable-target metadata, added 08 for the recovery tests, and restored the
+01 filename after the UI renamed it. Final .run XML fingerprints are recorded
+under build_support_sha256 in environment.json. This record does not claim
+that every shared configuration was run through the GUI.
+
+Operational note: after an external run-configuration reload, an unintended
+Continuous dashboard target was briefly selected. It fetched Git; HEAD was
+unchanged. Its tests passed 5/5, but submission failed because the attempted
+URL was the invalid http://. The operation was stopped. No valid CTest dashboard
+submission endpoint was configured and no successful submission was observed.
+This dashboard operation is excluded from the normal GUI build success claim.

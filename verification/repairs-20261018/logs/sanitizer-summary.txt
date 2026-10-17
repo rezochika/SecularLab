@@ -1,0 +1,19 @@
+Sanitizer validation investigation
+
+Initial parent run: ASAN+UBSAN Debug core and algebra passed; recovery produced repeated AddressSanitizer:DEADLYSIGNAL and timed out after 180s. Parent stopped ctest; full temporary log reached approximately 1.4GB. A bounded head/tail is saved separately.
+
+Independent reproduction: trivial program int main() { return 0; }, GCC address+undefined sanitizers and frame pointers. Default PIE: 25/30 launches passed, 5/30 emitted repeated AddressSanitizer:DEADLYSIGNAL until the 1MiB per-child file cap terminated them with SIGXFSZ (exit -25). Non-PIE (-fno-pie -no-pie): 100/100 launches passed.
+
+Inference: default PIE sanitizer startup is unstable in this container/host environment independently of SecularLab. These observations support a PIE/address-layout sanitizer startup issue; they do not establish the precise kernel/runtime cause.
+
+Code validation: fresh /tmp/sanitizer-review/build, CMake Debug, SECULAR_ENABLE_SANITIZERS=ON, CMAKE_CXX_FLAGS=-fno-pie and CMAKE_EXE_LINKER_FLAGS=-no-pie supplied only at configure time. No project CMake or production edits made for this investigation. Built all targets. All 5 CTest tests passed in 0.96s with 45s per-test timeout and inherited 2MiB file output cap. Includes exact_and_certified_regression, extended_exact_algebra, clustered_and_scaled_recovery, cli_and_matrix_integration, matrix_file_integrity.
+
+Commands:
+  g++ -fsanitize=address,undefined -fno-omit-frame-pointer -g toy.cpp -o toy-pie
+  g++ -fsanitize=address,undefined -fno-omit-frame-pointer -g -fno-pie -no-pie toy.cpp -o toy-nopie
+  cmake -S /src -B /tmp/sanitizer-review/build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSECULAR_ENABLE_SANITIZERS=ON -DCMAKE_CXX_FLAGS=-fno-pie -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+  cmake --build /tmp/sanitizer-review/build -j 2
+  ctest --test-dir /tmp/sanitizer-review/build --output-on-failure --timeout 45
+
+PIE child exit counts: {0: 25, -25: 5}
+Non-PIE child exit counts: {0: 100}

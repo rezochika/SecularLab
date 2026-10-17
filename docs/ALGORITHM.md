@@ -98,8 +98,12 @@ backend; they are not interval enclosures or a correctly-rounded special-functio
 
 Candidates are considered for exact certification after every second squaring once successive
 values are numerically stable to the heuristic absolute threshold 10^-(digits+16), and also
-at the configured squaring limit. Stability is not proof. A failed exact check restarts at
-higher candidate precision within a fixed upper limit. No unlimited-success claim is made.
+at the configured squaring limit. Stability is not proof or evidence that working precision
+is exhausted. After a failed exact check, the same pass continues squaring, with subsequent
+checks spaced 2, 4, 8, ... squarings apart to limit expensive inertia work. The final configured
+step is always checked. Actual arithmetic precision loss, or exhausting the squaring budget,
+can trigger a higher-precision pass within the fixed upper limit. No unlimited-success claim
+is made.
 
 ## 4. Exact inertia and certification
 
@@ -121,7 +125,13 @@ zero remainder contributes its dimension to the nullity. No tiny-pivot tolerance
 sign or floating-point Cholesky decision enters this certificate.
 
 For candidate k (0 is largest), construct exact rational endpoints ell,u around its rounded
-center. A nonsingular endpoint pair must satisfy
+center. Proposal widths depend on the requested decimal places, candidate magnitude, nearest
+candidate gap and working precision. This lets very small or closely spaced roots have
+distinct intervals even when their printed decimals are identical. Each candidate gets at
+most three increasingly narrow proposals, capped by a heuristic working-precision allowance
+that retains the original output-driven widths (so exact candidates can certify beyond their
+working precision), and by the decimal-scale resource limit. These heuristics only propose intervals; none relaxes
+the exact acceptance conditions. A nonsingular endpoint pair must satisfy
 
     positive_count(K-ell*M) = k+1,
     positive_count(K-u*M)   = k.

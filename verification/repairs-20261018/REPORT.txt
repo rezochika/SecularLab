@@ -1,0 +1,115 @@
+SecularLab repair verification — 2026-10-18
+
+This is a new working-tree verification record for branch
+codex/fix-certification-windows. It supplements the historical files directly
+under verification/ and verification/oilrig50/; those records were preserved.
+Source, header, changed/new test, support-script and native executable SHA256
+fingerprints appear in environment.json. They fingerprint working-tree bytes,
+not a commit. No commit is created by this record.
+
+Delivered behavior
+
+- Rational parsing validates mantissa grammar before decimal-point removal.
+  Misplaced signs are rejected, including .-1, .+1 and -.-1 in plain and
+  scientific notation; valid signed decimals, integers, p/q and e/E/d/D syntax
+  remain supported. The core regression contains 59 assertions.
+- Coefficient verification returns false for either matrix dimension mismatch
+  before accessing the second matrix's data.
+- Candidate certificate refinement adapts to close roots and their scale, and
+  failed exact acceptance permits additional Graeffe separation within the
+  configured resource budget. Exact inertia and rounding acceptance remain the
+  certification gate. Recovery tests cover 1e-20 separation, tiny roots around
+  1e-100, large roots around 1e100, combined tiny clusters, insufficient limits,
+  and an exact scalar with output precision exceeding working precision.
+- Native Windows Release/Debug builds use CLion's existing bundled MinGW plus
+  project-local GMP C++ and Boost dependencies. Full application tests passed.
+
+Executed checks
+
+Environment / configuration                    Result       Wall time
+Windows GCC 15.2.0 Release                      5/5 passed   0.96 s
+Windows GCC 15.2.0 Debug                        5/5 passed   1.17 s
+Linux GCC 12.2.0 final Release                  5/5 passed   0.39 s
+Linux Debug ASAN+UBSAN, local non-PIE flags     5/5 passed   0.86 s
+
+The five registered checks are exact_and_certified_regression,
+extended_exact_algebra, clustered_and_scaled_recovery,
+cli_and_matrix_integration, and matrix_file_integrity. Compact final logs are
+in logs/. Windows used GMP 6.3.0 and Boost 1.90.0; Linux used GMP 6.2.1 and
+Boost 1.74.0. Package/compiler details are in environment.json.
+
+Full native Windows oilrig run
+
+The complete 66-by-66 BCSSTK02/BCSSTM02 pencil certified 66/66 eigenvalues at
+50 decimal places, after 22 Graeffe squarings, using 256 working decimal digits
+and one precision attempt. Solver total time was 115.6921462 seconds. A separate
+verify invocation returned VERIFIED for all 66 certificates at 50 places.
+
+The exact native result summary, eigenvalue certificates and executed command
+are copied to oilrig50-windows/. All 66 printed decimal fields and the exact
+coefficient polynomial match the historical Linux result; coefficient text
+comparison normalized CRLF to LF. archive-comparison.json records a fresh
+comparison performed while preparing this record. It does not claim that all
+rational certificate endpoints are byte-identical. Coefficient/input files
+were not duplicated; environment.json hashes and references their current
+results/oilrig50-windows-fixed paths. The original matrices and historical
+verification inputs also remain available in the repository.
+
+Sanitizer caveat
+
+The initial default PIE ASAN+UBSAN run is recorded as failed: the recovery test
+emitted repeated AddressSanitizer:DEADLYSIGNAL and hit its 180-second timeout.
+The original temporary log reached 1,456,307,546 bytes. Only a bounded head/tail
+excerpt is included here.
+
+An independent int main(){return 0;} program with the same GCC sanitizers passed
+25/30 default-PIE launches; five produced runaway diagnostics until a 1 MiB
+per-child file cap terminated them with SIGXFSZ. The same toy built with
+-fno-pie -no-pie passed 100/100 launches. A fresh project Debug build using those
+flags only at configure time passed all five tests. This supports an
+environment-dependent PIE sanitizer runtime startup problem; the precise
+kernel/runtime cause was not established. No project CMake change was made to
+apply these local sanitizer validation flags. Toy results, environment and
+bounded initial failure evidence are included in logs/. The copied sanitizer
+summary describes the first diagnostic passing run (0.96 s); the final
+revalidation after the last solver refinement is separately recorded in
+linux-sanitizer-final-ctest.log (0.86 s).
+
+CLion GUI verification
+
+The parent observed successful Release and Debug profile configuration in CLion.
+With shared 01 selected, the small SPD solver run returned CERTIFIED 3/3 at
+50 decimal places, 10 Graeffe squarings and exit 0. The original configuration
+required manual executable selection; project-name and executable-target
+metadata were then corrected in shared 01-07, and 08 recovery was added.
+
+Ctrl+F9 with shared 01 explicitly selected invoked the secular CMake build
+target; Ninja reported no work and no errors. The GUI solver result is copied
+to clion-spd3/result.json. logs/clion-ui-observations.txt records these parent-
+observed UI steps; no screenshots are archived and execution of every shared
+configuration is not claimed. Final .run XML hashes are in environment.json.
+
+A briefly unintended Continuous dashboard target fetched Git without changing
+HEAD, passed 5/5 tests, and failed submission to the invalid http:// URL before
+being stopped. No valid dashboard endpoint was configured and no successful
+submission was observed. This operation is excluded from GUI build validation.
+
+Limits
+
+The upstream GMP full test suite was not run. The Windows GMP C library was
+reused from CLion; its matching C++ wrapper was built locally and smoke-tested,
+then exercised by all application tests. Separate certificate replay shares
+the application's exact-inertia implementation, so it is not an independently
+authored proof checker. This repair record contains no new SciPy/mpmath solve,
+Windows sanitizer run or macOS build. The single oilrig timing is not a
+controlled benchmark or a claim of speed superiority.
+
+
+
+Reproducible dependency setup
+
+The final tracked PowerShell 7 setup entrypoint completed with exit 0, passed
+both native dependency smoke checks, preserved existing user presets, and
+recreated the identical GMP C++ library used by the application validation.
+See docs/WINDOWS_SETUP.md. The CLion small-example result was preserved under
+results/spd3-clion-verified so its default output path is available again.
