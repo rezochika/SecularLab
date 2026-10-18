@@ -213,6 +213,27 @@ instead of evaluating them again. A missing key is still evaluated, so the gate 
 row whose endpoints were never tested. `verify` starts with an empty memo.
 `polynomial_sign_evaluations` counts the evaluations actually performed, not memo hits.
 
+When the polynomial attempt fails, exact inertia is tried on the same candidates only if it
+could succeed. With q = det(zE-F) verified, q(x)=0 exactly when x is an eigenvalue, that is,
+when qF-pE is singular. Both modes build the same proposals and differ only in the endpoint test.
+
+- The polynomial test skips a width only when q(ell) and q(u) are nonzero with equal signs.
+  Then neither endpoint is an eigenvalue, so the inertia singleton tests cannot pass. The
+  interval holds an even number of roots counting multiplicity, so the inertia counts k+1 and
+  k, which mean exactly one simple root, are impossible too.
+- An endpoint with q=0 is a polynomial singleton, which always passes the rounding gate.
+- When the polynomial test accepts a bracket, inertia either rejects it or accepts the same
+  interval. It then runs the same rounding and midpoint-sign tests, plus an inertia test.
+- The width sequence, its resource limit and the candidate ordering checks do not depend on the
+  mode.
+
+So if the polynomial attempt fails for some candidate, or in the ordering checks, the inertia
+attempt fails too, and it is skipped. Only a failure of the final gates, after every candidate
+had a row, is retried with exact inertia, because inertia may choose different widths. The same
+holds for `verify`: under the verified identity, a row whose exact signs fail also fails its
+inertia counts, so only a failure of the shared row checks reaches the inertia replay. Neither
+change alters what is accepted; only `inertia_evaluations` and the timings change.
+
 ## 5. Replay and failure reporting
 
 `verify` rereads the matrices and TSV and re-establishes positive definiteness, endpoint

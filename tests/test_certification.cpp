@@ -8,7 +8,7 @@ using namespace secular;
 static void require(bool b,const std::string& message) {
     if(!b)throw std::runtime_error(message);
 }
-static void compare_methods(const QMatrix& k,unsigned digits,const std::vector<std::string>& expected,bool early_fallback=false) {
+static void compare_methods(const QMatrix& k,unsigned digits,const std::vector<std::string>& expected,bool early_failure=false) {
     auto m=identity<Q>(k.n);
     Options options;
     options.digits=digits;
@@ -18,8 +18,10 @@ static void compare_methods(const QMatrix& k,unsigned digits,const std::vector<s
     require(fast.certified&&fast.certification_method=="polynomial","auto solve uses polynomial proof");
     require(fast.coefficient_identity_verified&&fast.polynomial_sign_evaluations>0,
             "polynomial proof requires verified identity and actual sign checks");
-    require(early_fallback?fast.inertia_evaluations>=2:fast.inertia_evaluations==2,
-            "fast solve avoids shifted inertia unless earlier candidates require fallback");
+    // Earlier candidates of a cluster fail inside certify_one. Under the verified identity
+    // exact inertia provably fails on them too, so it is not tried.
+    require(fast.inertia_evaluations==2,"fast solve tried the futile inertia fallback");
+    require(!early_failure||fast.polynomial_sign_evaluations>4*k.n,"cluster had no failed polynomial attempt");
     require(fast.coefficient_oracle=="modular"&&fast.oracle_moduli>=1&&
             fast.oracle_workers==std::min<std::size_t>(2,fast.oracle_moduli)&&fast.recurrence_workers==2&&
             fast.squarefree_modular_prime!=0,"oracle, recurrence workers and modular witness reported");
@@ -64,6 +66,9 @@ static void malformed_certificates() {
         auto reject=[&](const std::vector<RootCertificate>& roots,const std::string& name) {
             auto result=verify_certificates(k,m,roots,2,o);
             require(!result.certified&&result.status=="FAILED"&&result.roots.empty(),name);
+            // A failed exact sign under the verified identity also fails exact inertia, and
+            // a failed shared row check stops both before any shifted inertia.
+            require(!polynomial||result.inertia_evaluations==2,name+" after futile shifted inertia");
         };
         require(verify_certificates(k,m,good,2,o).certified,"hand-derived rational brackets accepted");
         auto bad=good; bad.pop_back(); reject(bad,"missing root rejected");
@@ -78,6 +83,7 @@ static void malformed_certificates() {
         bad=good; bad[0].radius=-1; reject(bad,"negative radius rejected");
         bad=good; bad[0].lower=4; reject(bad,"reversed interval rejected");
         bad=good; bad[0].lower=Q(30001,10000); reject(bad,"non-bracketing same-sign interval rejected");
+        require(polynomial||verify_certificates(k,m,bad,2,o).inertia_evaluations>2,"inertia replay skipped shifted inertia");
         bad=good; bad[0].lower=bad[0].upper=Q(30001,10000); reject(bad,"false singleton rejected");
         bad=good; bad[0].lower=3; reject(bad,"zero nonsingleton endpoint rejected");
         auto changed=k; changed(1,1)=4;

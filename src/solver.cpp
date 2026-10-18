@@ -166,13 +166,17 @@ namespace secular {
             }
             return true;
         }
+        // On failure, row_failure tells whether the shared checks passed and an exact sign of
+        // some row failed. With q = det(zE-F) verified, the row would then fail exact inertia too.
         bool polynomial_rootset(const std::vector<RootCertificate>& roots,SignEvaluator& signs,
-                                std::size_t n,unsigned digits,SolveResult& result) {
+                                std::size_t n,unsigned digits,SolveResult& result,bool* row_failure=nullptr) {
             // n disjoint brackets/singletons each contain a distinct real zero.
             // Only the verified original degree-n characteristic polynomial
             // makes this a proof of the entire spectrum and its sorted indices.
+            if(row_failure)*row_failure=false;
             const auto& co=signs.coefficients();
             if(!result.coefficient_identity_verified||co.size()!=n+1||co.front()==0||!valid_rows(roots,n,digits))return false;
+            if(row_failure)*row_failure=true;
             for(const auto& r:roots) {
                 int lo=signs(r.lower,result);
                 if(r.lower==r.upper) {
@@ -183,6 +187,7 @@ namespace secular {
                     if(lo==0||hi==0||lo==hi)return false;
                 }
             }
+            if(row_failure)*row_failure=false;
             return true;
         }
         bool inertia_rootset(const IntegerPencil& p,const std::vector<RootCertificate>& roots,
@@ -294,7 +299,10 @@ namespace secular {
             }
             return std::nullopt;
         }
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
+        // On failure, per_root_failure tells whether it happened before every candidate had a
+        // row: in the mode-independent ordering checks or inside certify_one.
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result,bool& per_root_failure) {
+            per_root_failure=true;
             std::vector<Q> approximations;
             for(const auto& candidate:candidates)approximations.push_back(rational(candidate));
             std::vector<RootCertificate> out;
@@ -311,6 +319,7 @@ namespace secular {
                 if(!r)return {};
                 out.push_back(std::move(*r));
             }
+            per_root_failure=false;
             if(!valid_rows(out,p.E.n,digits))return {};
             if(polynomial&&!polynomial_rootset(out,signs,p.E.n,digits,result))return {};
             return out;
@@ -403,11 +412,16 @@ namespace secular {
                         auto ct=Clock::now();
                         std::vector<RootCertificate> roots;
                         std::string method="exact_inertia";
+                        bool per_root_failure=false;
                         if(try_polynomial) {
-                            roots=certify_all(p,signs,candidates,o.digits,work,true,out);
+                            roots=certify_all(p,signs,candidates,o.digits,work,true,out,per_root_failure);
                             if(roots.size()==k.n)method="polynomial";
                         }
-                        if(roots.size()!=k.n)roots=certify_all(p,signs,candidates,o.digits,work,false,out);
+                        // With q = det(zE-F) verified, a per-root polynomial failure proves that
+                        // exact inertia fails on the same proposals (docs/ALGORITHM.md, section
+                        // 4). Only a failure of the final gates is retried with exact inertia.
+                        if(roots.size()!=k.n&&!(try_polynomial&&per_root_failure))
+                            roots=certify_all(p,signs,candidates,o.digits,work,false,out,per_root_failure);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);
@@ -470,11 +484,14 @@ namespace secular {
             try {
                 // A fresh evaluator: no sign is carried over from an earlier computation.
                 SignEvaluator signs(out.coefficients);
-                if(o.polynomial_certification&&polynomial_rootset(roots,signs,k.n,digits,out)) {
+                bool row_failure=false;
+                if(o.polynomial_certification&&polynomial_rootset(roots,signs,k.n,digits,out,&row_failure)) {
                     accepted=true;
                     out.certification_method="polynomial";
                 }
-                else if(inertia_rootset(p,roots,digits,out)) {
+                // A row that fails its exact signs under the verified identity fails exact
+                // inertia too, so only failures of the shared row checks reach inertia.
+                else if(!row_failure&&inertia_rootset(p,roots,digits,out)) {
                     accepted=true;
                     out.certification_method="exact_inertia";
                 }
