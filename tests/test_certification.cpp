@@ -92,6 +92,11 @@ static void malformed_certificates() {
         require(!verify_certificates(k,m,good,0,o).certified,"invalid precision rejected");
         bad={{0,Q(3),Q(3),Q(0),"3.00"},{1,Q(1),Q(1),Q(0),"1.00"}};
         require(verify_certificates(k,m,bad,2,o).certified,"exact singleton full rootset accepted");
+        // Denominators 300 are not decimal: the general evaluator decides those signs.
+        const std::vector<RootCertificate> mixed={{0,Q(899,300),Q(901,300),Q(1,300),"3.00"},
+                                                  {1,Q(999,1000),Q(1001,1000),Q(1,1000),"1.00"}};
+        require(verify_certificates(k,m,mixed,2,o).certified,"nondecimal and decimal brackets accepted");
+        bad=mixed; bad[0].lower=Q(9001,3000); bad[0].upper=Q(9002,3000); reject(bad,"nondecimal same-sign interval rejected");
     }
     QMatrix repeated=identity<Q>(2);
     auto result=solve(repeated,m,Options{});
@@ -112,6 +117,11 @@ int main() {
         write_result_json(json,result,options.digits);
         require(json.str().find("\"certification_method\": \"polynomial\"")!=std::string::npos,
                 "default solve must report a polynomial certificate proof");
+        // Each root certifies at its first proposal: two endpoint signs, which the final
+        // rootset gate reuses instead of evaluating again. A replay has no such memo.
+        require(result.polynomial_sign_evaluations==4,"rootset gate re-evaluated certify_one endpoints");
+        require(verify_certificates(k,identity<Q>(2),result.roots,options.digits).polynomial_sign_evaluations==4,
+                "replay evaluates every endpoint once");
         compare_methods(k,8,{"3.00000000","1.00000000"});
         QMatrix irrational(2);
         irrational(0,0)=3; irrational(1,1)=1;

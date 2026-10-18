@@ -187,6 +187,32 @@ Rational endpoint and integer-size costs are real; they are not treated as const
 The stored radius is max(|printed-ell|,|printed-u|), an exact rational bound about the *printed*
 value. A root at 1/4 rounded to 0.3 needs a radius at least 0.05 regardless of internal precision.
 
+### Polynomial proof
+
+`--certification auto` (the default) first tries a proof that needs no shifted inertia. It is
+available only after the oracle has verified q(z) = det(zE-F) for the original pencil. The same
+proposals are used, but an endpoint is tested by the exact sign of q. A width is accepted when
+q(ell) and q(u) are nonzero with opposite signs, so (ell,u) contains an odd number of roots.
+An endpoint with q=0 is itself a root and becomes an exact singleton. The decimal-rounding gate
+is the same as above. Once all n rows are formed, a final gate checks the shared row metadata and
+every sign again. n disjoint intervals, each holding a root, exhaust the n roots of the degree-n
+polynomial q. So each interval holds exactly one simple root, and the sorted rows carry the
+correct indices. This argument proves only a complete spectrum, never a partial one.
+
+For x=p/s in lowest terms with s>0, `polynomial_sign` returns the sign of the homogeneous
+integer value sum_i q_i p^(n-i) s^i = s^n q(x). Every proposal endpoint of one width w has a
+denominator dividing 10^(w+8), and the rounding midpoints have one dividing 10^(d+1). Signs at
+such decimal points share a table T_i = q_i*Q^i for a power of ten Q. The table is built once,
+and each sign is then the sign of sum_i T_i (xQ)^(n-i) = Q^n q(x), where xQ is an integer. Q is
+always the exact key: a point uses a table only after the exact test that den(x) divides Q, and
+any other point uses the general evaluation. Both give the identical sign; only the work changes.
+
+Within one solve, the signs of the fixed coefficient vector are kept in a memo keyed by the
+exact canonical rational. The final gate therefore re-reads the signs that certify_one computed
+instead of evaluating them again. A missing key is still evaluated, so the gate still catches a
+row whose endpoints were never tested. `verify` starts with an empty memo.
+`polynomial_sign_evaluations` counts the evaluations actually performed, not memo hits.
+
 ## 5. Replay and failure reporting
 
 `verify` rereads the matrices and TSV and re-establishes positive definiteness, endpoint

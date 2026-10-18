@@ -1039,6 +1039,31 @@ namespace secular {
         if(denominator<0&&(c.size()-1)%2)sign=-sign;
         return sign;
     }
+    ScaledPolynomial::ScaledPolynomial(const std::vector<Z>& c,const Z& denominator):q(denominator) {
+        if(c.empty())throw std::invalid_argument("empty polynomial");
+        if(q<=0)throw std::invalid_argument("scaled polynomial denominator must be positive");
+        table.resize(c.size());
+        Z power=1;
+        for(std::size_t i=0;i<c.size();++i) {
+            mpz_mul(table[i].get_mpz_t(),c[i].get_mpz_t(),power.get_mpz_t());
+            if(i+1<c.size())power*=q;
+        }
+    }
+    bool ScaledPolynomial::covers(const Q& x)const {
+        return mpz_sgn(x.get_den_mpz_t())>0&&mpz_divisible_p(q.get_mpz_t(),x.get_den_mpz_t());
+    }
+    int ScaledPolynomial::sign(const Q& x)const {
+        if(!covers(x))throw std::invalid_argument("denominator does not divide the scaled polynomial denominator");
+        // p=x*q is an integer, and v ends as sum_i c_i q^i p^(n-i) = q^n P(x) with q>0.
+        Z p,value=table.front();
+        mpz_divexact(p.get_mpz_t(),q.get_mpz_t(),x.get_den_mpz_t());
+        p*=x.get_num();
+        for(std::size_t i=1;i<table.size();++i) {
+            mpz_mul(value.get_mpz_t(),value.get_mpz_t(),p.get_mpz_t());
+            mpz_add(value.get_mpz_t(),value.get_mpz_t(),table[i].get_mpz_t());
+        }
+        return mpz_sgn(value.get_mpz_t());
+    }
     unsigned oracle_worker_count(unsigned requested,std::size_t jobs) {
         if(requested>64)throw std::invalid_argument("oracle workers must be 0..64");
         if(jobs==0)return 0;

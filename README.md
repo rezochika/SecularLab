@@ -131,7 +131,7 @@ build/release/secular solve --matrix matrices/examples/cluster3.mtx --digits 100
 - Signed-logarithmic Graeffe iteration, avoiding giant repeatedly squared coefficients. No external eigensolver or Newton polishing supplies its roots.
 - Exact symmetric inertia with a fraction-free path and a rational block-LDL fallback for zero diagonal pivots.
 - Exact rational root intervals, index verification, correct half-away-from-zero decimal rounding, and radii about the printed values.
-- Exact polynomial signs via homogeneous integer evaluation at rational endpoints. Once the matrix-derived degree-`n` characteristic identity is verified, `n` disjoint brackets with strict opposite signs or exact singleton zeros exhaust all roots. This full-spectrum argument does not certify a partial spectrum. Ambiguous endpoint cases retain the exact-inertia fallback.
+- Exact polynomial signs via homogeneous integer evaluation at rational endpoints. Once the matrix-derived degree-`n` characteristic identity is verified, `n` disjoint brackets with strict opposite signs or exact singleton zeros exhaust all roots. This full-spectrum argument does not certify a partial spectrum. Ambiguous endpoint cases retain the exact-inertia fallback. Endpoints that share a power-of-ten denominator use a table of the coefficients scaled once by that power, after an exact divisibility check. Within one solve, the final rootset gate reuses the endpoint signs already computed, through a memo keyed by the exact rational.
 - Portable TSV certificates, separate replay, CSV/TSV-compatible coefficient records and JSON execution summaries.
 
 See `docs/ALGORITHM.md` for the correspondence with the paper, actual proof obligations and limitations.
@@ -142,7 +142,7 @@ JSON summaries add:
 - `oracle_moduli`: the primes that decided a modular check.
 - The actual `oracle_workers` and `recurrence_workers`, each clamped to its phase's jobs.
 - `squarefree_modular_prime`: zero means no modular witness (exact fallback, or a check that was not run, as in inertia-only replay).
-- Counts of polynomial-sign and inertia evaluations, including the two mandatory positive-definiteness checks.
+- Counts of polynomial-sign and inertia evaluations, including the two mandatory positive-definiteness checks. `polynomial_sign_evaluations` counts evaluations actually performed: a solve no longer repeats its endpoint signs in the final gate, so on BCSSTK05 it reports 306 instead of 612, the same as `verify`.
 
 `times_seconds.initialization` and `times_seconds.squarefree` supplement the existing phase timings and total time. `exact_divisions` counts the divisions actually performed. For symmetric pencils that is `n(n+1)/2` entry divisions per stage instead of `n^2`. Coefficient and certificate TSV formats are unchanged, as are the requested decimal places and exact half-away-from-zero rounding; `--digits 50` still requests 50 places after the decimal point.
 

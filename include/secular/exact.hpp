@@ -84,6 +84,23 @@ namespace secular {
     Q evaluate(const std::vector<Z>& coefficients,const Q& x);
     // Exact sign at a rational point, using only integer arithmetic.
     int polynomial_sign(const std::vector<Z>& coefficients,const Q& x);
+    // Exact signs at rationals whose canonical denominator divides a fixed q>0. The table
+    // T_i=c_i*q^i is formed once; each sign is then a Horner pass over the integer x*q, since
+    // sum_i T_i*(x*q)^(n-i) = q^n*P(x). The sign always equals polynomial_sign.
+    class ScaledPolynomial {
+    public:
+        ScaledPolynomial(const std::vector<Z>& coefficients,const Z& denominator);
+        const Z& denominator()const {
+            return q;
+        }
+        // True when the denominator of x is positive and divides q.
+        bool covers(const Q& x)const;
+        // Throws std::invalid_argument unless covers(x).
+        int sign(const Q& x)const;
+    private:
+        Z q;
+        std::vector<Z> table;
+    };
     struct SquarefreeResult {
         bool repeated=false;
         // Nonzero only for a degree-preserving modular squarefree proof.

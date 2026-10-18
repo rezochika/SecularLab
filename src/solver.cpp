@@ -3,6 +3,7 @@
 #include <chrono>
 #include <algorithm>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <optional>
 #include <limits>
@@ -92,10 +93,62 @@ namespace secular {
             return static_cast<long>(positive.get_num().get_str().size())-
                    static_cast<long>(positive.get_den().get_str().size());
         }
-        int counted_sign(const std::vector<Z>& coefficients,const Q& x,SolveResult& result) {
-            ++result.polynomial_sign_evaluations;
-            return polynomial_sign(coefficients,x);
+        // The least m with den | 10^m, when den>0 has no prime factors besides 2 and 5.
+        std::optional<unsigned long> decimal_exponent(const Z& den) {
+            if(den<=0)return std::nullopt;
+            Z rest;
+            const auto twos=mpz_scan1(den.get_mpz_t(),0);
+            mpz_tdiv_q_2exp(rest.get_mpz_t(),den.get_mpz_t(),twos);
+            const Z five=5;
+            const auto fives=mpz_remove(rest.get_mpz_t(),rest.get_mpz_t(),five.get_mpz_t());
+            if(rest!=1)return std::nullopt;
+            return std::max<unsigned long>(twos,fives);
         }
+        // Exact signs of one fixed coefficient vector. A repeated point is answered from a memo
+        // keyed by its canonical rational, so the final rootset gate reuses the signs certify_one
+        // computed. New points with decimal denominators, as every proposal endpoint and rounding
+        // midpoint has, share scaled tables at powers of ten; other points use the general
+        // evaluator. Neither changes a sign, only the work: the counter records evaluations.
+        class SignEvaluator {
+        public:
+            explicit SignEvaluator(const std::vector<Z>& coefficients):co(coefficients) {}
+            const std::vector<Z>& coefficients()const {
+                return co;
+            }
+            int operator()(const Q& x,SolveResult& result) {
+                if(const auto hit=memo.find(x);hit!=memo.end())return hit->second;
+                ++result.polynomial_sign_evaluations;
+                const int sign=evaluate(x);
+                memo.emplace(x,sign);
+                return sign;
+            }
+        private:
+            struct Table {
+                unsigned long power;
+                ScaledPolynomial values;
+            };
+            int evaluate(const Q& x) {
+                const auto power=decimal_exponent(x.get_den());
+                if(!power||*power>max_power)return polynomial_sign(co,x);
+                // The smallest cached 10^m with den(x) | 10^m, unless it is much longer.
+                const Table* best=nullptr;
+                for(const auto& t:tables)
+                    if(t.power>=*power&&t.power-*power<=slack&&(!best||t.power<best->power))best=&t;
+                if(!best) {
+                    if(tables.size()==capacity)tables.erase(tables.begin());
+                    tables.push_back({*power,ScaledPolynomial(co,pow10(static_cast<unsigned>(*power)))});
+                    best=&tables.back();
+                }
+                return best->values.sign(x);
+            }
+            // Proposal widths of one candidate differ by 8 and 24 places; rounding midpoints of
+            // the default widths need 15 places fewer than their endpoints.
+            static constexpr unsigned long max_power=100000,slack=16;
+            static constexpr std::size_t capacity=4;
+            const std::vector<Z>& co;
+            std::map<Q,int> memo;
+            std::vector<Table> tables;
+        };
         Inertia counted_inertia(const IntegerPencil& p,const Q& x,SolveResult& result) {
             ++result.inertia_evaluations;
             return shifted_inertia(p.F,p.E,x);
@@ -113,19 +166,20 @@ namespace secular {
             }
             return true;
         }
-        bool polynomial_rootset(const std::vector<RootCertificate>& roots,const std::vector<Z>& co,
+        bool polynomial_rootset(const std::vector<RootCertificate>& roots,SignEvaluator& signs,
                                 std::size_t n,unsigned digits,SolveResult& result) {
             // n disjoint brackets/singletons each contain a distinct real zero.
             // Only the verified original degree-n characteristic polynomial
             // makes this a proof of the entire spectrum and its sorted indices.
+            const auto& co=signs.coefficients();
             if(!result.coefficient_identity_verified||co.size()!=n+1||co.front()==0||!valid_rows(roots,n,digits))return false;
             for(const auto& r:roots) {
-                int lo=counted_sign(co,r.lower,result);
+                int lo=signs(r.lower,result);
                 if(r.lower==r.upper) {
                     if(lo!=0)return false;
                 }
                 else {
-                    int hi=counted_sign(co,r.upper,result);
+                    int hi=signs(r.upper,result);
                     if(lo==0||hi==0||lo==hi)return false;
                 }
             }
@@ -181,7 +235,7 @@ namespace secular {
             out.squarefree_modular_prime=squarefree.modular_prime;
             return squarefree.repeated;
         }
-        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,const std::vector<Z>& coefficients,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
+        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,SignEvaluator& signs,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
             if(approx<=0)return std::nullopt;
             const long scale=decimal_scale(approx);
             long places=std::max(static_cast<long>(digits)+8,9-scale);
@@ -207,7 +261,7 @@ namespace secular {
                 Q radius(1,pow10(width));
                 Q lower=center-radius,upper=center+radius;
                 if(polynomial) {
-                    int lo=counted_sign(coefficients,lower,result),hi=counted_sign(coefficients,upper,result);
+                    int lo=signs(lower,result),hi=signs(upper,result);
                     if(lo==0)upper=lower;
                     else if(hi==0)lower=upper;
                     else if(lo==hi)continue;
@@ -223,7 +277,7 @@ namespace secular {
                     if(hi-lo!=1)continue;
                     Q midpoint(lo+hi,2*pow10(digits));
                     midpoint.canonicalize();
-                    if(counted_sign(coefficients,midpoint,result)!=0)continue;
+                    if(signs(midpoint,result)!=0)continue;
                     if(!polynomial) {
                         auto mi=counted_inertia(pencil,midpoint,result);
                         if(mi.zero!=1||mi.positive!=index)continue;
@@ -240,7 +294,7 @@ namespace secular {
             }
             return std::nullopt;
         }
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,const std::vector<Z>& co,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
             std::vector<Q> approximations;
             for(const auto& candidate:candidates)approximations.push_back(rational(candidate));
             std::vector<RootCertificate> out;
@@ -253,12 +307,12 @@ namespace secular {
                     if(gap<=0)return {};
                     if(separation==0||gap<separation)separation=gap;
                 }
-                auto r=certify_one(p,co,approximations[i],separation,i,digits,work,polynomial,result);
+                auto r=certify_one(p,signs,approximations[i],separation,i,digits,work,polynomial,result);
                 if(!r)return {};
                 out.push_back(std::move(*r));
             }
             if(!valid_rows(out,p.E.n,digits))return {};
-            if(polynomial&&!polynomial_rootset(out,co,p.E.n,digits,result))return {};
+            if(polynomial&&!polynomial_rootset(out,signs,p.E.n,digits,result))return {};
             return out;
         }
         std::string escape(const std::string& s) {
@@ -307,6 +361,8 @@ namespace secular {
             out.total_seconds=elapsed(begin);
             return out;
         }
+        // Signs of the fixed coefficient vector, shared by every certification attempt.
+        SignEvaluator signs(out.coefficients);
         for(unsigned work=o.precision;;) {
             ++out.attempts;
             out.working_digits=work;
@@ -348,10 +404,10 @@ namespace secular {
                         std::vector<RootCertificate> roots;
                         std::string method="exact_inertia";
                         if(try_polynomial) {
-                            roots=certify_all(p,out.coefficients,candidates,o.digits,work,true,out);
+                            roots=certify_all(p,signs,candidates,o.digits,work,true,out);
                             if(roots.size()==k.n)method="polynomial";
                         }
-                        if(roots.size()!=k.n)roots=certify_all(p,out.coefficients,candidates,o.digits,work,false,out);
+                        if(roots.size()!=k.n)roots=certify_all(p,signs,candidates,o.digits,work,false,out);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);
@@ -412,7 +468,9 @@ namespace secular {
             auto timer=Clock::now();
             bool accepted=false;
             try {
-                if(o.polynomial_certification&&polynomial_rootset(roots,out.coefficients,k.n,digits,out)) {
+                // A fresh evaluator: no sign is carried over from an earlier computation.
+                SignEvaluator signs(out.coefficients);
+                if(o.polynomial_certification&&polynomial_rootset(roots,signs,k.n,digits,out)) {
                     accepted=true;
                     out.certification_method="polynomial";
                 }
