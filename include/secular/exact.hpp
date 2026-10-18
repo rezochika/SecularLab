@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <optional>
 
 namespace secular {
@@ -60,6 +62,12 @@ namespace secular {
     struct Inertia {
         std::size_t positive {},negative {},zero {};
     };
+    // A cooperative cancellation check for long exact work: true once its result is no longer
+    // needed. Work that finds it true throws Cancelled; an empty check never cancels.
+    using CancelCheck=std::function<bool()>;
+    struct Cancelled:std::runtime_error {
+        Cancelled():std::runtime_error("exact work cancelled") {}
+    };
     Inertia inertia(const ZMatrix& a);
     Inertia inertia(const QMatrix& a);
     // Exact congruence certificate for any proposal x. It requires x upper triangular with a
@@ -67,10 +75,25 @@ namespace secular {
     // inertia(a) = inertia(B) is the sign count of diag(B), with nullity zero. Returns nullopt
     // when either test fails, which says nothing about a.
     std::optional<Inertia> certify_congruence(const ZMatrix& a,const ZMatrix& x);
+    // Largest proposal precision congruence_inertia accepts.
+    constexpr unsigned max_congruence_precision=16384;
     // certify_congruence for x = 2^(precision_bits-8)*L^-T, truncated to integers. L is an
-    // untrusted floating-point LDL^T factor of a at precision_bits (16..4096), set per object.
-    // A zero floating pivot, or a factor far beyond the scale of a, also gives nullopt.
+    // untrusted floating-point LDL^T factor of a at precision_bits (16..max_congruence_precision),
+    // set per object. A zero floating pivot, or a factor far beyond the scale of a, also gives nullopt.
     std::optional<Inertia> congruence_inertia(const ZMatrix& a,unsigned precision_bits);
+    struct InertiaReport {
+        Inertia inertia;
+        // Exact test that decided: "diagonal" (sign count), "congruence" or "elimination"
+        // (the fraction-free inertia).
+        std::string method;
+        // Proposal precision of a deciding congruence, 0 otherwise.
+        unsigned precision_bits=0;
+    };
+    // The exact inertia of a symmetric matrix: the diagonal sign count, else congruence_inertia at
+    // each proposal precision in turn, else inertia(). Every outcome is exact and the same; the
+    // precisions only change the work.
+    InertiaReport scheduled_inertia(const ZMatrix& a,const std::vector<unsigned>& precisions,
+                                    const CancelCheck& cancelled={});
     struct DefinitenessReport {
         bool positive_definite=false;
         // Exact test that decided: "diagonal" (sign count), "congruence" or "elimination"
@@ -79,15 +102,23 @@ namespace secular {
         // Proposal precision of a deciding congruence, 0 otherwise.
         unsigned precision_bits=0;
     };
-    // Exact positive-definiteness test of a symmetric matrix: the diagonal sign count, else
-    // congruence_inertia at 64, 128 and 256 bits, else inertia(). Every outcome is exact.
+    // Exact positive-definiteness test of a symmetric matrix: scheduled_inertia at 64, 128 and
+    // 256 bits. Every outcome is exact.
     DefinitenessReport check_positive_definite(const ZMatrix& a);
     struct IntegerPencil {
         ZMatrix E,F;
         Z scale;
     };
     IntegerPencil integer_pencil(const QMatrix& stiffness,const QMatrix& mass);
-    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& shift);
+    // Proposal precisions for the endpoint matrix den(s)*F-num(s)*E: P = 64+bits(den(s)), rounded
+    // up to whole 64-bit limbs, then 2P and 4P, dropping those above max_congruence_precision. An
+    // endpoint near an eigenvalue makes the matrix nearly singular, and the denominator of a
+    // proposal endpoint grows with how near it may be.
+    std::vector<unsigned> shifted_precisions(const Q& shift);
+    // scheduled_inertia of den(s)*F-num(s)*E at shifted_precisions(s), which is the inertia of F-sE.
+    InertiaReport shifted_inertia_report(const ZMatrix& f,const ZMatrix& e,const Q& shift,
+                                         const CancelCheck& cancelled={});
+    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& shift,const CancelCheck& cancelled={});
     struct CoefficientResult {
         std::vector<Z> coefficients;
         // descending powers, actual signs: det(zE-F)
@@ -145,6 +176,21 @@ namespace secular {
     SquarefreeResult check_squarefree(const std::vector<Z>& coefficients);
     // 0 selects hardware concurrency, capped at eight; explicit counts are 1..64.
     unsigned oracle_worker_count(unsigned requested,std::size_t jobs);
+    struct OrderedRun {
+        // The first index whose job returned false or threw; the job count when none did.
+        std::size_t stop=0;
+        // The exception of job `stop`, when it threw.
+        std::exception_ptr error;
+    };
+    // Runs job(0), job(1), ... on up to `workers` threads, the caller included, handing out indices
+    // in increasing order. The outcome is that of the serial loop that stops at the first job
+    // returning false or throwing: every job below `stop` ran once and returned true, and job `stop`
+    // ran once. Later jobs may run or be skipped, so their effects must be discarded. Jobs must be
+    // safe to run concurrently. A job's exception is returned, never rethrown here.
+    // job(i,superseded) may stop early once superseded() is true: a lower job has then stopped the
+    // run, so job i's result is discarded whatever it is. It never turns true for jobs up to `stop`.
+    OrderedRun run_ordered(std::size_t jobs,unsigned workers,
+                           const std::function<bool(std::size_t,const CancelCheck&)>& job);
     enum class CoefficientOracle {
         // Multimodular characteristic polynomial; n+1 Bareiss determinants if inconclusive.
         automatic,

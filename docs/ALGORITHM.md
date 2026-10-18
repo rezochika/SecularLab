@@ -196,18 +196,20 @@ For rational s=p/q with q>0, the integer symmetric matrix
 has the same inertia as K-sM. Because M is positive definite, its positive eigenvalue count
 is exactly the number of generalized eigenvalues greater than s.
 
-The fast inertia routine uses fraction-free symmetric elimination. A diagonal matrix needs no
+Every inertia, of an endpoint matrix as of F and E in the positive-definiteness checks, is
+decided by one of three exact tests, tried in this order. A diagonal matrix needs no
 elimination: its eigenvalues are its diagonal entries, so their signs are counted directly.
-Symmetric row/column permutations are congruences and do not alter inertia. At each step the
-sign of the LDL pivot equals sign(current Bareiss pivot / previous Bareiss pivot).
+Otherwise the congruence certificate at the end of this section is tried, in which floating
+point only proposes and an exact integer test decides. When it fails, fraction-free symmetric
+elimination decides. Symmetric row/column permutations are congruences and do not alter
+inertia. At each step the sign of the LDL pivot equals sign(current Bareiss pivot / previous
+Bareiss pivot).
 
-When all active diagonal entries are zero but an off-diagonal remains, the program falls
+When all active diagonal entries are zero but an off-diagonal remains, the elimination falls
 back to exact rational block elimination. A block [[0,b],[b,0]], b!=0, contributes one
 positive and one negative eigenvalue; its Schur complement is formed exactly. An entirely
 zero remainder contributes its dimension to the nullity. No tiny-pivot tolerance, guessed
-sign or floating-point Cholesky decision enters this certificate. The positive-definiteness
-checks may instead use the congruence certificate at the end of this section, in which floating
-point only proposes and an exact integer test decides.
+sign or floating-point Cholesky decision enters any of the three tests.
 
 For candidate k (0 is largest), construct exact rational endpoints ell,u around its rounded
 center. Proposal widths depend on the requested decimal places, candidate magnitude, nearest
@@ -293,20 +295,24 @@ holds for `verify`: under the verified identity, a row whose exact signs fail al
 inertia counts, so only a failure of the shared row checks reaches the inertia replay. Neither
 change alters what is accepted; only `inertia_evaluations` and the timings change.
 
-### Congruence certificate for positive definiteness
+### Congruence certificate
 
-Each positive-definiteness check needs one inertia. Elimination on F is nevertheless the costliest
-part of initialization, because Bareiss entries grow into leading minors about k times as long as
-an entry. For a symmetric A that is not diagonal, `check_positive_definite` therefore first tries
-a certificate whose integers stay short.
+Elimination is exact but costly, because Bareiss entries grow into leading minors about k times
+as long as an entry. On BCSSTK05 one elimination took 0.84 s for F, and 7-8 s for an endpoint
+matrix qF-pE, whose entries are longer by the bits of q. For a symmetric A that is not diagonal,
+every inertia therefore first tries a certificate whose integers stay short.
 
 - Proposal, untrusted. A GMP floating-point LDL^T of A without pivoting, at a precision P set on
   each object, gives W, approximately L^-1. The process-global default precision is neither read
   nor changed. X = trunc(2^(P-8)*W^T) is an integer matrix, upper triangular with 2^(P-8) on its
   diagonal by construction. A zero floating pivot abandons the proposal, and so does an entry of
   W above 2^(P+b), where b is the bit length of the longest entry of A; that bounds the exact work.
+  One n-by-n floating array suffices: W^T overwrites the factored upper triangle, which is no
+  longer needed once L and the pivots are known.
 - Check, exact. X must be upper triangular with a nonzero diagonal, so det X != 0. B = X^T A X
-  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|.
+  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|. B is formed one
+  row of its upper triangle at a time and not kept. That row completes the off-diagonal sum of
+  row i, since the entries b(k,i), k<i, came with earlier rows, so a failing row ends the check.
 
 When the check passes, B is symmetric and strictly diagonally dominant. B and every
 diag(B)+t(B-diag(B)), 0<=t<=1, are then nonsingular (Levy-Desplanques), so no eigenvalue crosses
@@ -316,20 +322,70 @@ refutes positive definiteness just as exactly.
 
 The floating-point stage decides nothing: a poor proposal can only fail the exact check. A tie in
 the dominance test is a failure. A singular A always fails, because a singular B cannot be
-strictly diagonally dominant. Proposals at P = 64, 128 and 256 are tried in that order; when
-none passes, the fraction-free inertia above decides, unchanged. The work is O(n^3)
-floating-point operations at a few limbs, plus about n^3/6 integer products of entries near
-2P+b bits. On BCSSTK05 the 64-bit proposal certifies F in 0.02 s, where elimination took
-0.84 s. The oil-rig K certifies at 64 bits too. Badly conditioned matrices need more: integer
-Hilbert matrices of order 16 need 128 bits, order 30 needs 256, and from about order 60 they fall
-back to elimination. The shifted endpoint inertias of the inertia certificate still use elimination.
+strictly diagonally dominant. Each A gets a short, deterministic schedule of precisions, tried in
+order; when none passes, the fraction-free inertia above decides, unchanged. No precision above
+16384 bits is tried. The work is O(n^3) floating-point operations at a few limbs, plus about
+n^3/6 integer products of entries near 2P+b bits.
+
+- Positive definiteness: P = 64, 128 and 256. On BCSSTK05 the 64-bit proposal certifies F in
+  0.02 s. The oil-rig K certifies at 64 bits too. Badly conditioned matrices need more: integer
+  Hilbert matrices of order 16 need 128 bits, order 30 needs 256, and from about order 60 they
+  fall back to elimination.
+- Endpoints: a proposal endpoint s=p/q of width w lies within about 10^-w of an eigenvalue, and
+  q divides 10^(w+8). Near an eigenvalue qF-pE is nearly singular, with a condition number that
+  grows like 1/|s-lambda|, so the precision grows with q: P = 64+bits(q), rounded up to whole
+  64-bit limbs, then 2P and 4P. At 50 places that is 320, 640 and 1280 bits. All 132 oil-rig
+  endpoints and all 306 BCSSTK05 endpoints certify at 320 bits; an earlier measurement found
+  only 74 of the 132 oil-rig endpoints at 192 bits, and all at 256. An oil-rig endpoint takes
+  about 8 ms instead of 0.62 s, a BCSSTK05 endpoint about 0.03 s instead of 6.8 s. An exact
+  singleton endpoint is an eigenvalue, so qF-pE is singular: its proposals always fail, and
+  elimination proves the nullity. A denominator longer than about 16300 bits leaves no precision
+  in the schedule, and elimination decides directly.
+
+Certificates and `inertia_evaluations` are unchanged: the counter counts inertias, whichever test
+decided them.
+
+### Parallel inertia certification
+
+Exact inertia certifies one root per job, on as many threads as the coefficient phases use
+(`--workers`, clamped to n). In `solve` a job is certify_one for one candidate; in `verify` it is
+the inertia test of one row. The rows, the counters and any error are those of the serial loop
+for every worker count:
+
+- The candidate ordering checks run first, serially. Only the roots below the first candidate
+  that fails them are submitted: the roots the serial loop could reach.
+- Roots are handed out in increasing order. The run stops at the lowest root that fails or
+  throws, as the serial loop would, and every root below it has run and passed. Roots above it
+  may have run too, but their rows, counts and exceptions are discarded, and no worker starts a
+  root above a known failure.
+- A job counts its own inertias and records the polynomial signs it requests; inertia mode
+  needs them only at rounding midpoints. It may read the attempt's sign memo, but never changes
+  it. After the run the roots up to the stop, in index order, add their inertia counts and
+  replay their sign requests into the memo: a point missing from it counts one evaluation and is
+  stored. So `inertia_evaluations` and `polynomial_sign_evaluations` equal the serial counts,
+  and so does the memo that a later step of the same attempt reads.
+- An exception is rethrown after this counting, and only when it came from the stopping root. An
+  exception from a root above a failure is dropped, since the serial loop never reaches that root.
+- A root that is already running when a lower one stops abandons its exact work. Elimination
+  polls once per pivot, the proposal once per factorization step and the dominance check once per
+  row, whether the run has stopped below that root; if so they throw, and the exception is
+  discarded with the rest of the root. The poll never fires for a root at or below the stop, so a
+  hand-edited certificate with a cheap wrong first row and huge later rows fails as fast as in
+  serial replay.
+
+Each running root holds its own proposal and, when elimination decides, its own Bareiss matrix,
+so peak memory grows with the worker count; `--workers 1` bounds it to one root. The polynomial
+proof stays serial: its signs share one evaluator's scaled tables and memo, and its whole
+certification takes about 0.05 s on BCSSTK05. With eight workers `--certification inertia` now
+solves the oil rig in about 0.27 s instead of 78 s, and BCSSTK05 in about 2 s instead of 2024 s
+(1.7 s and 14 s with one worker).
 
 ## 5. Replay and failure reporting
 
 `verify` rereads the matrices and TSV and re-establishes positive definiteness, endpoint
 inertias, root indices, disjointness, exact rounding and every radius bound. It does not trust
 an earlier status string. The replay shares the native inertia implementation and the
-positive-definiteness certificate with the solver;
+congruence certificate with the solver;
 calling it an independent-authorship proof checker would overstate its independence.
 
 - `CERTIFIED`, exit 0: all n eigenvalues accepted with stated decimal rounding and radii.
@@ -356,7 +412,9 @@ O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
 squarings costs r square roots per root. Exact inertia is O(n^3) arithmetic per endpoint,
-normally two endpoints for each root, and may dominate total time. A polynomial sign costs one
+normally two endpoints for each root, on short floating-point and integer entries when the
+congruence certificate passes and on growing Bareiss entries when elimination decides. The roots
+of the inertia proof run in parallel. A polynomial sign costs one
 Horner pass of integer products, which a shared scaled table keeps short.
 
 The result timings separate coefficients, coefficient oracle, Graeffe and certification. Total
