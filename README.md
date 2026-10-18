@@ -82,7 +82,9 @@ In its default `auto` mode, the `verify` subcommand derives its characteristic p
 
 For `solve` and `verify`, `--certification auto` is the default. Use `--certification inertia` to request the original exact-inertia proof directly. `--no-coefficient-check` is available for solve and coefficients; a solve with this option always uses inertia certification. Verify rejects this option, so it cannot weaken the independent proof.
 
-All three commands accept `--workers 0..64` for independent determinant-oracle checks, including the affine coefficient grid. The default `0` chooses a hardware-based count capped at 8. Explicit counts from 1 through 64 are capped by the number of oracle jobs; `--workers 1` requests serial checking. Each successful identity check still evaluates all `n+1` distinct points exactly.
+The coefficient identity `det(zE-F) = q(z)` is checked by `--oracle auto` (the default) or `--oracle bareiss`. Auto compares `q` with the characteristic polynomial of the pencil modulo proven primes below `2^62`, using a Hessenberg reduction per prime. It continues until the primes' product exceeds a rigorous Hadamard-type coefficient bound. Agreement is then an exact, deterministic proof, and one disagreement is an exact refutation. Auto falls back to the original `n+1` Bareiss determinants in two cases. If every prime divides `det E` (a singular leading matrix) the modular check is inconclusive. For tiny orders with very long entries, a size-only cost estimate finds the determinants clearly cheaper. `--oracle bareiss` requests those determinants directly. The JSON field `coefficient_oracle` reports which one decided. Both are formulations independent of the coefficient recurrence, and both give identical artifacts. `--oracle` requires a coefficient check: it is rejected with `--no-coefficient-check` and with inertia-only replay.
+
+All three commands accept `--workers 0..64` for exact parallel work: the rows of each fixed-pencil coefficient-recurrence stage and the independent oracle jobs (primes, or Bareiss points), including the checks of the affine coefficient grid. The formal affine recurrence itself stays serial. The default `0` chooses a hardware-based count capped at 8. Explicit counts from 1 through 64 are clamped to the jobs of each phase; `--workers 1` requests serial work. Exact results and artifacts never depend on the worker count.
 
 ### Small example / debugger
 
@@ -106,7 +108,7 @@ Here `K(t)=K0+t*K1=D-t*X` and `t=P_128(1/3)` is evaluated **exactly as a rationa
 build/release/secular coefficients --matrix matrices/examples/galerkin2_K0.mtx --mass matrices/examples/galerkin2_M.mtx --affine matrices/examples/galerkin2_K1.mtx --out results/affine2
 ```
 
-This uses the coefficientwise affine adjugate recurrence, retaining formal `t`. With the default checks it verifies the identity on an exact two-dimensional evaluation grid. Output is `coefficients_affine.tsv`. For a fixed rational specialization, add `--parameter 1/3`.
+This uses the coefficientwise affine adjugate recurrence, retaining formal `t`. With the default checks it specializes `t=0,...,n` and proves each specialized identity with the selected coefficient oracle (`--oracle`). Together with the degree bounds in both variables, that proves the bivariate identity. Output is `coefficients_affine.tsv`. For a fixed rational specialization, add `--parameter 1/3`.
 
 ### Higher precision or a deliberately limited test
 
@@ -121,9 +123,9 @@ build/release/secular solve --matrix matrices/examples/cluster3.mtx --digits 100
 ## What is implemented
 
 - Exact parsing of integers, finite decimals, scientific `e/E/d/D` notation, and rational `p/q` tokens.
-- Denominator clearing, Faddeev-LeVerrier/adjugate recurrence, checked integer divisions and `S_n=0`.
-- Direct Bareiss determinant checks at `n+1` distinct points, proving the whole coefficient polynomial identity.
-- Parallel determinant checks with private exact-arithmetic scratch space and configurable worker count.
+- Denominator clearing, Faddeev-LeVerrier/adjugate recurrence, checked integer divisions and `S_n=0`. For symmetric pencils only the upper triangle of each symmetric `S_k` is computed. The rows of every fixed-pencil stage run in parallel; the formal affine recurrence is serial.
+- A multimodular proof of the whole coefficient polynomial identity: characteristic polynomials modulo proven primes, with a rigorous Hadamard-type bound. Direct Bareiss determinant checks at `n+1` distinct points remain available, and are the fallback when the modular check is inconclusive.
+- Parallel oracle jobs and recurrence rows with private exact-arithmetic scratch space and configurable worker count.
 - A sufficient modular squarefree proof over fixed verified primes. A degree drop or nontrivial modular gcd is inconclusive and leads to another prime or the existing exact gcd fallback; it never alone establishes repeated roots.
 - Formal affine coefficient polynomials for `det(zE-F0-tF1)`.
 - Signed-logarithmic Graeffe iteration, avoiding giant repeatedly squared coefficients. No external eigensolver or Newton polishing supplies its roots.
@@ -134,13 +136,21 @@ build/release/secular solve --matrix matrices/examples/cluster3.mtx --digits 100
 
 See `docs/ALGORITHM.md` for the correspondence with the paper, actual proof obligations and limitations.
 
-JSON summaries add `certification_method` (`polynomial`, `exact_inertia`, or `none`), the actual `oracle_workers`, `squarefree_modular_prime` (zero means no modular witness: exact fallback or a check that was not run, as in inertia-only replay), and counts of polynomial-sign and inertia evaluations (including the two mandatory positive-definiteness checks). `times_seconds.initialization` and `times_seconds.squarefree` supplement the existing phase timings and total time. Coefficient and certificate TSV formats are unchanged, as are the requested decimal places and exact half-away-from-zero rounding; `--digits 50` still requests 50 places after the decimal point.
+JSON summaries add:
+- `certification_method`: `polynomial`, `exact_inertia`, or `none`.
+- `coefficient_oracle`: `modular`, `bareiss`, or `none` when no identity check ran.
+- `oracle_moduli`: the primes that decided a modular check.
+- The actual `oracle_workers` and `recurrence_workers`, each clamped to its phase's jobs.
+- `squarefree_modular_prime`: zero means no modular witness (exact fallback, or a check that was not run, as in inertia-only replay).
+- Counts of polynomial-sign and inertia evaluations, including the two mandatory positive-definiteness checks.
+
+`times_seconds.initialization` and `times_seconds.squarefree` supplement the existing phase timings and total time. `exact_divisions` counts the divisions actually performed. For symmetric pencils that is `n(n+1)/2` entry divisions per stage instead of `n^2`. Coefficient and certificate TSV formats are unchanged, as are the requested decimal places and exact half-away-from-zero rounding; `--digits 50` still requests 50 places after the decimal point.
 
 ## Supported scope and honest limitations
 
 **Root solving:** symmetric positive definite `K` and `M`, with a simple spectrum. Repeated roots are detected exactly and reported as `REPEATED_SPECTRUM`. Indefinite/nonsymmetric problems are not silently shifted, approximated by symmetric matrices, or passed to a different eigensolver. **Coefficient construction** permits nonsymmetric inputs with any nonsingular leading `M`.
 
-The implementation is dense and intended as a reproducible research reference, not a replacement for fast sparse eigensolvers. Independent determinant identity checks can run in parallel; coefficient construction and Graeffe recovery remain serial. Limits are order 256 (formal affine mode: 24), requested decimal places 1..1000, candidate working precision 32..20000, at most 512 Graeffe squarings, and Legendre degree at most 10000. Some permitted inputs can exhaust time or memory or fail to certify within the configured limits.
+The implementation is dense and intended as a reproducible research reference, not a replacement for fast sparse eigensolvers. The rows of each fixed-pencil coefficient-recurrence stage and the independent oracle jobs run in parallel. The stages themselves, the formal affine recurrence and Graeffe recovery remain serial. Limits are order 256 (formal affine mode: 24), requested decimal places 1..1000, candidate working precision 32..20000, at most 512 Graeffe squarings, and Legendre degree at most 10000. Some permitted inputs can exhaust time or memory or fail to certify within the configured limits.
 
 Exact arithmetic uses **GMP**. Candidates use **Boost.Multiprecision's GMP floating-point backend**, not MPFR. Their logarithms and exponentials are untrusted approximations; acceptance is exact and independent of their error estimates. This backend choice differs from the manuscript's historical/native programs. No claim of formal C++ verification is made. Because the floating-point default precision is process-global, concurrent calls to `solve` in one process are not supported.
 
@@ -152,13 +162,13 @@ The certificate refers to the matrix whose published entries are interpreted as 
 ctest --preset release --output-on-failure
 ```
 
-The standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, fast exact arithmetic, both certification methods, CLI examples, known-spectrum generalized pencils, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, disjoint certificates for tiny roots, serial/parallel artifact equivalence, altered certificates, matrix mismatch, and replay independent of saved coefficient/status files. The dense 3-by-3 fixture is also checked directly against its known eigenvalues 4, 2, 1, including all certificate bounds and radii. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
+The standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, fast exact arithmetic, the parallel recurrence and both coefficient oracles, both certification methods, CLI examples, known-spectrum generalized pencils, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, disjoint certificates for tiny roots, serial/parallel artifact equivalence, altered certificates, matrix mismatch, and replay independent of saved coefficient/status files. The dense 3-by-3 fixture is also checked directly against its known eigenvalues 4, 2, 1, including all certificate bounds and radii. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
 
 The known-spectrum tests construct `M = C^T C` and `K = C^T D C` using Python's exact `Fraction` arithmetic. Each spectrum has two invertible rational triangular transforms with non-unit determinants and non-diagonal mass matrices. The independent reference polynomial is `det(C)^2 * product(z - D[i,i])`; every emitted coefficient must equal this reference multiplied by the independently derived denominator-clearing factor `L^n`. No solver polynomial, inertia, or rounding helper supplies expected values.
 
-The cases cover separated roots at 50 decimal places, close distinct roots with the same printed decimal, and exact half-away-from-zero rounding ties. Tests check every root's enclosure, index, rounded decimal, endpoint rounding, radius and separation. Each input exercises `auto` and `inertia` in both solve and replay with one and four oracle workers, with serial/parallel artifact equivalence. Deliberately corrupted output controls confirm that the independent checker rejects incorrect coefficients and certificates. This deterministic family complements the recorded engineering runs; it does not replace them or imply that every supported matrix will certify within a fixed resource budget.
+The cases cover separated roots at 50 decimal places, close distinct roots with the same printed decimal, and exact half-away-from-zero rounding ties. Tests check every root's enclosure, index, rounded decimal, endpoint rounding, radius and separation. Each input exercises `auto` and `inertia` in both solve and replay with one and four workers, with serial/parallel artifact equivalence. Deliberately corrupted output controls confirm that the independent checker rejects incorrect coefficients and certificates. This deterministic family complements the recorded engineering runs; it does not replace them or imply that every supported matrix will certify within a fixed resource budget.
 
-Orders 8, 16 and 32 are all registered in the normal CTest suite as `known_spectrum_8`, `known_spectrum_16` and `known_spectrum_32`. Each order exercises six pencils with 24 solves and 24 cross-method replays. Local Windows CLion Release measurements took approximately 1.22, 1.87 and 8.41 seconds per order, respectively, so these cases do not require the optional slow engineering-test flag. These are observed runtimes, not pass/fail thresholds or performance guarantees. With Python available, the standard suite now contains ten test groups.
+Orders 8, 16 and 32 are all registered in the normal CTest suite as `known_spectrum_8`, `known_spectrum_16` and `known_spectrum_32`. Each order exercises six pencils with 24 solves and 24 cross-method replays. Local Windows CLion Release measurements took approximately 1.15, 1.63 and 6.11 seconds per order, respectively, so these cases do not require the optional slow engineering-test flag. These are observed runtimes, not pass/fail thresholds or performance guarantees. With Python available, the standard suite now contains eleven test groups. One of them, `parallel_recurrence_and_modular_oracle`, compares the symmetric and parallel recurrence with the original serial recurrence on random pencils for several worker counts. It also checks both oracles against each other and against corrupted coefficients, including a residue-preserving corruption, skipped moduli and the singular-E fallback.
 
 ```bash
 # Only the three known-spectrum groups; use the Windows CLion preset locally.

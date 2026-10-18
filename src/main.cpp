@@ -19,11 +19,12 @@ namespace {
                 [--affine K1.mtx --parameter 1/3]
                 [--affine K1.mtx --legendre-degree 128 --argument 1/3]
                 [--workers 0..64] [--certification auto|inertia]
-                [--no-coefficient-check] [--out results/new-run]
+                [--oracle auto|bareiss] [--no-coefficient-check] [--out results/new-run]
   secular coefficients --matrix K.mtx [--mass M.mtx] [--affine K1.mtx]
-                       [--workers 0..64] [--out results/new-coefficients]
+                       [--workers 0..64] [--oracle auto|bareiss] [--out results/new-coefficients]
   secular verify --matrix K.mtx [--mass M.mtx] --cert eigenvalues.tsv
-                 [--workers 0..64] [--certification auto|inertia] [--out results/replay]
+                 [--workers 0..64] [--certification auto|inertia] [--oracle auto|bareiss]
+                 [--out results/replay]
 
 Matrix Market real/integer coordinate or array files; exact decimal/scientific
 and rational tokens supported. Omitted mass is identity. Affine input means
@@ -36,7 +37,10 @@ NOT a certificate. Auto certification uses an exactly verified characteristic
 polynomial and a complete disjoint root proof, with exact inertia fallback.
 Inertia mode checks the original pencil directly. Decimal rounding is exact
 half-away-from-zero. Auto verify derives its polynomial from the input matrices.
-Workers 0 means automatic (at most 8); explicit 1..64 is clamped to oracle jobs.
+Oracle auto proves the coefficient identity modulo proven primes, using n+1 Bareiss
+determinants when inconclusive or estimated cheaper; bareiss always uses them.
+Workers run fixed-pencil recurrence rows and oracle jobs: 0 means automatic (at most 8);
+explicit 1..64 is clamped to the jobs of each phase. Results never depend on it.
 --no-coefficient-check forces solve to use inertia and is forbidden for verify.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum
@@ -74,7 +78,7 @@ int main(int argc,char** argv) {
         std::string mode=argv[1];
         if(mode!="solve"&&mode!="coefficients"&&mode!="verify")throw std::invalid_argument("unknown command: "+mode);
         const std::set<std::string> valued= {
-            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert","--workers","--certification"
+            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert","--workers","--certification","--oracle"
         };
         std::map<std::string,std::string> args;
         bool check=true;
@@ -101,6 +105,13 @@ int main(int argc,char** argv) {
             if(method!="auto"&&method!="inertia")throw std::invalid_argument("--certification must be auto or inertia");
             if(mode=="coefficients")throw std::invalid_argument("--certification requires solve or verify");
             o.polynomial_certification=method=="auto";
+        }
+        if(args.count("--oracle")) {
+            const auto& oracle=args.at("--oracle");
+            if(oracle!="auto"&&oracle!="bareiss")throw std::invalid_argument("--oracle must be auto or bareiss");
+            if(!check||(mode=="verify"&&!o.polynomial_certification))
+                throw std::invalid_argument("--oracle requires a coefficient identity check");
+            o.coefficient_oracle=oracle=="auto"?CoefficientOracle::automatic:CoefficientOracle::bareiss;
         }
         if(mode=="verify"&&!check)throw std::invalid_argument("--no-coefficient-check is not allowed for verify");
         if(args.count("--digits"))o.digits=number(args.at("--digits"),1000);
@@ -182,7 +193,8 @@ int main(int argc,char** argv) {
                             std::reverse(row.begin(),row.end());
                             specialized.push_back(evaluate(row,value));
                         }
-                        if(!verify_coefficients(e,f,specialized,o.oracle_workers))throw std::logic_error("affine determinant-grid identity failed");
+                        if(!check_coefficients(e,f,specialized,o.oracle_workers,o.coefficient_oracle).verified)
+                            throw std::logic_error("affine determinant-grid identity failed");
                     }
                 }
                 auto f=output(dir/"coefficients_affine.tsv");
@@ -196,11 +208,13 @@ int main(int argc,char** argv) {
                 return 0;
             }
             auto p=integer_pencil(k,m);
-            auto co=characteristic(p.E,p.F);
-            bool verified=check&&verify_coefficients(p.E,p.F,co.coefficients,o.oracle_workers);
-            if(check&&!verified)throw std::logic_error("coefficient identity failed");
+            auto co=characteristic(p.E,p.F,o.oracle_workers);
+            OracleReport oracle;
+            if(check)oracle=check_coefficients(p.E,p.F,co.coefficients,o.oracle_workers,o.coefficient_oracle);
+            if(check&&!oracle.verified)throw std::logic_error("coefficient identity failed");
             coefficients_file(dir/"coefficients.tsv",co.coefficients,p.scale);
-            std::cout<<"EXACT_COEFFICIENTS order="<<k.n<<" determinant_identity_verified="<<(verified?"yes":"no")<<'\n';
+            std::cout<<"EXACT_COEFFICIENTS order="<<k.n<<" determinant_identity_verified="<<(oracle.verified?"yes":"no")
+                     <<" coefficient_oracle="<<oracle.method<<'\n';
             return 0;
         }
         o.progress=[](const std::string& s) {

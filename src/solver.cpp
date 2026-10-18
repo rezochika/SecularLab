@@ -153,18 +153,24 @@ namespace secular {
         void compute_coefficients(const IntegerPencil& p,const Options& o,SolveResult& out,bool verify) {
             if(o.progress)o.progress("Computing exact characteristic coefficients...");
             auto timer=Clock::now();
-            auto c=characteristic(p.E,p.F);
+            auto c=characteristic(p.E,p.F,o.oracle_workers);
             out.coefficients_seconds=elapsed(timer);
             out.coefficients=std::move(c.coefficients);
             out.exact_divisions=c.exact_divisions;
             out.max_coefficient_bits=c.max_coefficient_bits;
             out.max_workspace_bits=c.max_workspace_bits;
+            out.recurrence_workers=c.workers;
             if(verify) {
-                if(o.progress)o.progress("Checking polynomial at n+1 independent Bareiss determinants...");
-                out.oracle_workers=oracle_worker_count(o.oracle_workers,out.order+1);
+                if(o.progress)o.progress(o.coefficient_oracle==CoefficientOracle::bareiss?
+                    "Checking polynomial at n+1 independent Bareiss determinants...":
+                    "Checking polynomial against det(zE-F) modulo proven primes...");
                 timer=Clock::now();
-                out.coefficient_identity_verified=verify_coefficients(p.E,p.F,out.coefficients,out.oracle_workers);
+                const auto report=check_coefficients(p.E,p.F,out.coefficients,o.oracle_workers,o.coefficient_oracle);
                 out.oracle_seconds=elapsed(timer);
+                out.oracle_workers=report.workers;
+                out.coefficient_oracle=report.method;
+                out.oracle_moduli=report.moduli;
+                out.coefficient_identity_verified=report.verified;
                 if(!out.coefficient_identity_verified)throw std::logic_error("independent determinant verification failed");
             }
         }
@@ -494,6 +500,9 @@ namespace secular {
            <<"  \"recurrence_workspace_bits_max\": "<<r.max_workspace_bits<<",\n"
            <<"  \"coefficient_identity_verified\": "<<(r.coefficient_identity_verified?"true":"false")<<",\n"
            <<"  \"oracle_workers\": "<<r.oracle_workers<<",\n"
+           <<"  \"recurrence_workers\": "<<r.recurrence_workers<<",\n"
+           <<"  \"coefficient_oracle\": \""<<r.coefficient_oracle<<"\",\n"
+           <<"  \"oracle_moduli\": "<<r.oracle_moduli<<",\n"
            <<"  \"squarefree_modular_prime\": "<<r.squarefree_modular_prime<<",\n"
            <<"  \"polynomial_sign_evaluations\": "<<r.polynomial_sign_evaluations<<",\n"
            <<"  \"inertia_evaluations\": "<<r.inertia_evaluations<<",\n"

@@ -47,15 +47,50 @@ Release builds. The last S_n must be the zero matrix. The exported vector is
 
 For diagonal E, applying J*T/d is equivalent to dividing row i of T by E_ii. The implementation
 uses this exact cancellation, with a divisibility check on every entry. It is not floating-point
-inversion of the mass matrix. For general E, its determinant is computed by fraction-free
-Bareiss elimination; a rational Gauss-Jordan inverse times d gives the integer adjugate.
+inversion of the mass matrix. For diagonal E, d is the product of the diagonal and J_ii=d/E_ii.
+For general E, its determinant is computed by fraction-free Bareiss elimination, and a rational
+Gauss-Jordan inverse times d gives the integer adjugate.
 
-By default the result is independently checked at n+1 distinct points z=-1,...,-(n+1).
-At each point a fresh Bareiss determinant of zE-F must equal exact polynomial Horner evaluation.
-Both sides have degree at most n, so agreement at n+1 distinct points proves the coefficient
-identity in exact arithmetic. This is an independent formulation, not independent authorship
-or formal verification of the implementations. `--no-coefficient-check` skips this additional
-oracle; it never disables the recurrence's exact division and terminal-zero checks.
+Matching powers of z in (zE-F)adj(zE-F) = det(zE-F)I shows that S_k is the coefficient of
+z^(n-1-k) in adj(zE-F). For symmetric E and F that adjugate is symmetric, so every S_k is symmetric.
+Only the entries (i,j) with j>=i are then computed, stored and exactly divided. For diagonal E,
+row i of T_k is formed only on and right of its diagonal and divided straight into S_k; for general
+E the full T_k is formed and only the upper triangle of J(T_k-c_k I)/d. Nonsymmetric pencils use
+the full matrices. In each stage the rows are independent jobs for the `--workers` threads. Every
+entry is the same exact integer for any schedule, and a failure reports the lowest failing row.
+Every division that is performed is still checked, and S_n=0 is tested on every stored entry.
+For symmetric pencils, symmetry makes the skipped lower-triangle divisions and tests redundant.
+
+By default the result is then checked independently of the recurrence by a multimodular
+characteristic polynomial (`--oracle auto`). For a prime p not dividing det E, det(zE-F) =
+det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced to upper Hessenberg form by
+similarity, its characteristic polynomial follows from the Hessenberg recurrence, and all n+1
+coefficients of q, including q_0=det E, must match det(E) chi modulo p.
+
+Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
+determinant bounds every true coefficient by the corresponding coefficient B_m of
+prod_i(ceil||E_i|| z + ceil||F_i||), indexed in descending powers like q. Primes are taken from a
+fixed descending sequence in (2^61, 2^62), each proven by Miller-Rabin with the first twelve prime
+bases 2,...,37. That test is deterministic below 318665857834031151167461 (about 3.18*10^23). Since
+every prime exceeds 2^61, k matching primes have a product above 2^(61k). Primes are taken until
+61k >= bits(max_m(|q_m|+B_m)), so the product exceeds max_m(|q_m|+B_m) >= |q_m-P_m|. Then
+q_m ≡ P_m modulo that product forces q_m = P_m: the identity is proven, deterministically.
+One mismatch modulo any prime refutes it.
+
+Primes dividing det E are skipped, never trusted. B_0 = prod_i ceil||E_i|| bounds |det E|, and a
+nonzero det E <= B_0 has fewer than bits(B_0)/61 prime factors above 2^61. Once that many are
+skipped, det E = 0 is proven and the modular check is inconclusive; the original oracle then
+decides. The same oracle also decides when a size-only estimate of limb operations says it is
+clearly cheaper. That happens for tiny orders with very long entries, because the modular check
+reduces every entry and coefficient once per prime. Both choices are exact proofs.
+
+That original oracle (`--oracle bareiss`, and the auto fallback) checks n+1 distinct points
+z=-1,...,-(n+1). At each point a fresh Bareiss determinant of zE-F must equal exact polynomial
+Horner evaluation. Both sides have degree at most n, so agreement at n+1 distinct points proves
+the coefficient identity in exact arithmetic. Both oracles are formulations independent of the
+recurrence, not independent authorship or formal verification of the implementations.
+`--no-coefficient-check` skips the oracle; it never disables the recurrence's exact division and
+terminal-zero checks.
 
 Before recovery, a primitive integer pseudo-remainder gcd of f and f' detects repeated roots.
 They are reported as `REPEATED_SPECTRUM`, with no claim of distinct indexed enclosures.
@@ -64,8 +99,8 @@ They are reported as `REPEATED_SPECTRUM`, with no claim of distinct indexed encl
 
 For F(t)=F0+tF1, the same recurrence is applied coefficientwise. Stage k stores at most k+1
 matrix coefficients. The output `[k][j]` is the actual signed coefficient of z^(n-k)t^j.
-With checking enabled, specialization at t=0,...,n and direct determinants at n+1 distinct
-z-values prove the bivariate coefficient identity, using the degree bounds in each variable.
+With checking enabled, specialization at t=0,...,n and a complete univariate coefficient oracle
+at each t prove the bivariate coefficient identity, using the degree bounds in each variable.
 Formal affine mode has a separate order limit of 24.
 
 `solve --parameter t` instead specializes exact rational K0+tK1 *before* the numeric pencil
@@ -175,6 +210,11 @@ Fixed numeric dense coefficients need O(n) matrix products, hence O(n^4) ordinar
 operations with classical multiplication, plus determinant/adjugate construction. The formal
 affine recurrence needs O(n^5) coefficientwise integer operations. These are not bit-complexity
 bounds. Integer coefficient length, input denominators and elimination growth can dominate.
+Symmetric pencils need about half of those operations, and the n rows of each stage are spread
+over the workers. The modular oracle needs O(n^3) word operations per prime, plus one pass over
+every entry and coefficient to form residues. The number of primes is about the bound's bit
+length divided by 61. The n+1 Bareiss determinants instead cost
+O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe pass costs O(n^2) high-precision signed-log operations. Exact inertia is O(n^3)
 arithmetic per endpoint, normally two endpoints for each root, and may dominate total time.
 
@@ -188,6 +228,12 @@ to those exact rational matrices, not to unknown physical-parameter uncertainty.
 with a double-precision solver establishes 50-digit accuracy; the exact certificate does that.
 
 The `recurrence_workspace_bits_max` field measures the largest entry of T_k-c_k I at
-the sampled recurrence stages, not the peak bit length of every GMP temporary.
-`exact_divisions` counts divisions in the coefficient recurrence, not those inside
-Bareiss elimination, its oracle or the inertia routine.
+the sampled recurrence stages, not the peak bit length of every GMP temporary. When only the
+upper triangle of T_k is formed (symmetric pencil, diagonal E), each entry below the diagonal is
+measured as E_jj*S_k(i,j), which equals it exactly. It is formed only when it could raise the
+maximum, so the field keeps its full-matrix meaning.
+`exact_divisions` counts the divisions the coefficient recurrence actually performs: one trace
+division per stage, plus n(n+1)/2 entry divisions per stage for symmetric pencils, or n^2
+otherwise. It excludes those inside Bareiss elimination, the oracles or the inertia routine.
+`coefficient_oracle` names the oracle that decided the identity, `oracle_moduli` the primes of a
+modular decision, and `oracle_workers` and `recurrence_workers` the threads actually used.

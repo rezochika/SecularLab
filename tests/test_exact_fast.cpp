@@ -93,6 +93,9 @@ int main() {
             for(std::size_t k=0;k<corrupt.size();++k)corrupt[k]+=perturbation[k];
             check(!verify_coefficients(e,f,corrupt,1),"serial oracle skipped a point");
             check(!verify_coefficients(e,f,corrupt,4),"parallel oracle skipped a point");
+            for(unsigned workers:{1u,4u})
+                check(!check_coefficients(e,f,corrupt,workers,CoefficientOracle::bareiss).verified,
+                      "Bareiss oracle skipped a point");
         }
         auto nonsymmetric=e;
         nonsymmetric(0,1)=2; nonsymmetric(1,2)=-3;

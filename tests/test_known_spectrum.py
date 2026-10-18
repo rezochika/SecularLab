@@ -304,7 +304,12 @@ def run_case(runner, directory, family, order, variant):
                 require(result["certified"] and result["coefficient_identity_verified"],
                         "solve must certify and independently check coefficient identity")
                 require(result["certification_method"] == proof, "requested proof mode")
-                require(result["oracle_workers"] == workers, "requested worker configuration")
+                require(result["coefficient_oracle"] == "modular" and result["oracle_moduli"] >= 1,
+                        "modular coefficient oracle")
+                # Each exact phase clamps the requested workers to its own jobs.
+                require(result["oracle_workers"] == min(workers, result["oracle_moduli"]) and
+                        result["recurrence_workers"] == min(workers, order),
+                        "requested worker configuration")
                 require(result["certified_eigenvalues"] == order, "complete result root count")
                 require(int(result["denominator_clearing_multiplier"]) == multiplier,
                         "result denominator-clearing multiplier")
@@ -341,8 +346,11 @@ def run_case(runner, directory, family, order, variant):
                 require(result["status"] == "VERIFIED" and result["certified"], "certified replay")
                 require(result["certification_method"] == proof, "requested replay proof mode")
                 # Inertia replay has no coefficient-oracle jobs to parallelize.
-                require(result["oracle_workers"] == (workers if method == "auto" else 0),
+                require(result["oracle_workers"] ==
+                        (min(workers, result["oracle_moduli"]) if method == "auto" else 0),
                         "replay coefficient-oracle worker count")
+                require(result["coefficient_oracle"] == ("modular" if method == "auto" else "none"),
+                        "replay coefficient oracle follows proof mode")
                 require(result["coefficient_identity_verified"] == (method == "auto"),
                         "replay coefficient identity follows proof mode")
                 require(result["certified_eigenvalues"] == order, "complete replay root count")
