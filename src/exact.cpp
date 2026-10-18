@@ -4,6 +4,11 @@
 #include <fstream>
 #include <sstream>
 #include <limits>
+#include <atomic>
+#include <cstdint>
+#include <exception>
+#include <mutex>
+#include <thread>
 
 namespace secular {
     namespace {
@@ -112,6 +117,45 @@ namespace secular {
             for(const auto& v:p)mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),v.get_mpz_t());
             if(p.back()<0)g=-g;
             if(g!=1)for(auto& v:p)v=exact_divide(v,g);
+        }
+        // All residues and products are uint64_t: unsigned long is only 32 bits
+        // on Windows, and (65537-1)^2 already exceeds that range.
+        using Residue=std::uint64_t;
+        using ModularPolynomial=std::vector<Residue>;
+        void trim_modular(ModularPolynomial& p) {
+            while(!p.empty()&&p.back()==0)p.pop_back();
+        }
+        Residue modular_power(Residue base,Residue exponent,Residue prime) {
+            Residue result=1;
+            while(exponent) {
+                if(exponent&1)result=result*base%prime;
+                base=base*base%prime;
+                exponent>>=1;
+            }
+            return result;
+        }
+        bool modular_squarefree(const std::vector<Z>& primitive_polynomial,unsigned long prime) {
+            ModularPolynomial a;
+            a.reserve(primitive_polynomial.size());
+            for(const auto& v:primitive_polynomial)a.push_back(mpz_fdiv_ui(v.get_mpz_t(),prime));
+            // A degree drop cannot prove anything about the original polynomial.
+            if(a.back()==0)return false;
+            ModularPolynomial b;
+            b.reserve(a.size()-1);
+            for(std::size_t i=1;i<a.size();++i)b.push_back((i%prime)*a[i]%prime);
+            trim_modular(b);
+            while(!b.empty()) {
+                const auto inverse=modular_power(b.back(),prime-2,prime);
+                while(a.size()>=b.size()) {
+                    const auto offset=a.size()-b.size();
+                    const auto factor=a.back()*inverse%prime;
+                    for(std::size_t j=0;j<b.size();++j)
+                        a[offset+j]=(a[offset+j]+prime-factor*b[j]%prime)%prime;
+                    trim_modular(a);
+                }
+                a.swap(b);
+            }
+            return a.size()==1;
         }
     }
     Z pow10(unsigned d) {
@@ -441,21 +485,78 @@ namespace secular {
         for(const auto& a:c)v=v*x+a;
         return v;
     }
-    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c) {
-        if(e.n!=f.n||c.size()!=e.n+1)return false;
-        for(std::size_t k=0;k<=e.n;++k) {
+    int polynomial_sign(const std::vector<Z>& c,const Q& x) {
+        if(c.empty())throw std::invalid_argument("empty polynomial");
+        // At stage k, v = denominator^k times the partial Horner value.
+        // A canonical rational has positive denominator, so no sign is lost.
+        const Z numerator=x.get_num(),denominator=x.get_den();
+        Z value=c.front(),denominator_power=1;
+        for(std::size_t i=1;i<c.size();++i) {
+            denominator_power*=denominator;
+            value*=numerator;
+            mpz_addmul(value.get_mpz_t(),c[i].get_mpz_t(),denominator_power.get_mpz_t());
+        }
+        int sign=mpz_sgn(value.get_mpz_t());
+        if(denominator<0&&(c.size()-1)%2)sign=-sign;
+        return sign;
+    }
+    unsigned oracle_worker_count(unsigned requested,std::size_t jobs) {
+        if(requested>64)throw std::invalid_argument("oracle workers must be 0..64");
+        if(jobs==0)return 0;
+        unsigned workers=requested;
+        if(workers==0)workers=std::min(8u,std::max(1u,std::thread::hardware_concurrency()));
+        return static_cast<unsigned>(std::min<std::size_t>(workers,jobs));
+    }
+    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested) {
+        // Validate before scheduling; public Matrix fields may have been edited.
+        const auto workers=oracle_worker_count(requested,e.n<max_dimension+1?e.n+1:0);
+        if(e.n==0||e.n>max_dimension||e.n!=f.n||c.size()!=e.n+1||
+           e.data.size()!=e.n*e.n||f.data.size()!=e.n*e.n)return false;
+        auto check_point=[&](std::size_t k) {
             Z x=-Z(static_cast<unsigned long>(k+1));
             ZMatrix a(e.n);
             for(std::size_t i=0;i<a.data.size();++i)a.data[i]=x*e.data[i]-f.data[i];
-            if(determinant(a)!=evaluate(c,x))return false;
+            return determinant(std::move(a))==evaluate(c,x);
+        };
+        if(workers==1) {
+            for(std::size_t k=0;k<=e.n;++k)if(!check_point(k))return false;
+            return true;
         }
-        return true;
+        std::atomic<std::size_t> next{0};
+        std::atomic<bool> valid{true};
+        std::mutex exception_mutex;
+        std::exception_ptr first_exception;
+        {
+            // jthread destruction joins even if a later thread creation throws.
+            // Inputs are read-only; determinant matrices and GMP temporaries are
+            // local to each job. Success consumes all n+1 distinct points.
+            std::vector<std::jthread> threads;
+            threads.reserve(workers);
+            for(unsigned i=0;i<workers;++i)threads.emplace_back([&] {
+                try {
+                    for(;;) {
+                        const auto k=next.fetch_add(1,std::memory_order_relaxed);
+                        if(k>e.n)break;
+                        if(!check_point(k))valid.store(false,std::memory_order_relaxed);
+                    }
+                } catch(...) {
+                    std::lock_guard lock(exception_mutex);
+                    if(!first_exception)first_exception=std::current_exception();
+                }
+            });
+        }
+        if(first_exception)std::rethrow_exception(first_exception);
+        return valid.load(std::memory_order_relaxed);
     }
-    bool has_repeated_roots(const std::vector<Z>& c) {
+    SquarefreeResult check_squarefree(const std::vector<Z>& c) {
         if(c.size()<2||c.front()==0)throw std::invalid_argument("invalid polynomial");
         std::vector<Z> a(c.rbegin(),c.rend()),b;
-        for(std::size_t i=1;i<a.size();++i)b.push_back(a[i]*static_cast<unsigned long>(i));
         primitive(a);
+        // Fixed proven primes; a modular gcd of one is sufficient, never a
+        // nontrivial modular gcd (which may merely reflect colliding roots).
+        for(unsigned long prime:{2UL,3UL,5UL,7UL,11UL,65537UL})
+            if(modular_squarefree(a,prime))return {false,prime};
+        for(std::size_t i=1;i<a.size();++i)b.push_back(a[i]*static_cast<unsigned long>(i));
         primitive(b);
         while(!b.empty()) {
             auto r=a;
@@ -469,7 +570,10 @@ namespace secular {
             a=std::move(b);
             b=std::move(r);
         }
-        return a.size()>1;
+        return {a.size()>1,0};
+    }
+    bool has_repeated_roots(const std::vector<Z>& c) {
+        return check_squarefree(c).repeated;
     }
     Z round_scaled(const Q& x,unsigned d) {
         Q q=x*pow10(d);

@@ -37,7 +37,8 @@ namespace secular {
             if(x.value<y.value)std::swap(hi,lo);
             Real diff=lo->value-hi->value;
             // Only the UNTRUSTED candidate stage drops negligible terms. Acceptance
-            // later recomputes exact inertia of the original rational pencil.
+            // later proves the complete rootset with verified exact coefficients
+            // or recomputes exact inertia of the original rational pencil.
             if(diff<cutoff)return *hi;
             Real t=exp(diff);
             if(hi->sign==lo->sign)return {
@@ -91,7 +92,90 @@ namespace secular {
             return static_cast<long>(positive.get_num().get_str().size())-
                    static_cast<long>(positive.get_den().get_str().size());
         }
-        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,const std::vector<Z>& coefficients,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work) {
+        int counted_sign(const std::vector<Z>& coefficients,const Q& x,SolveResult& result) {
+            ++result.polynomial_sign_evaluations;
+            return polynomial_sign(coefficients,x);
+        }
+        Inertia counted_inertia(const IntegerPencil& p,const Q& x,SolveResult& result) {
+            ++result.inertia_evaluations;
+            return shifted_inertia(p.F,p.E,x);
+        }
+        // All proof paths share the complete metadata and decimal-rounding gate.
+        bool valid_rows(const std::vector<RootCertificate>& roots,std::size_t n,unsigned digits) {
+            if(n==0||roots.size()!=n||digits<1||digits>1000)return false;
+            for(std::size_t i=0;i<n;++i) {
+                const auto& r=roots[i];
+                if(r.index!=i||r.lower>r.upper||r.radius<0||(i&&r.upper>=roots[i-1].lower))return false;
+                Q printed=parse_rational(r.decimal);
+                if(format_decimal(round_scaled(printed,digits),digits)!=r.decimal)return false;
+                if(format_decimal(round_scaled(r.lower,digits),digits)!=r.decimal||format_decimal(round_scaled(r.upper,digits),digits)!=r.decimal)return false;
+                if(r.radius<qabs(printed-r.lower)||r.radius<qabs(printed-r.upper))return false;
+            }
+            return true;
+        }
+        bool polynomial_rootset(const std::vector<RootCertificate>& roots,const std::vector<Z>& co,
+                                std::size_t n,unsigned digits,SolveResult& result) {
+            // n disjoint brackets/singletons each contain a distinct real zero.
+            // Only the verified original degree-n characteristic polynomial
+            // makes this a proof of the entire spectrum and its sorted indices.
+            if(!result.coefficient_identity_verified||co.size()!=n+1||co.front()==0||!valid_rows(roots,n,digits))return false;
+            for(const auto& r:roots) {
+                int lo=counted_sign(co,r.lower,result);
+                if(r.lower==r.upper) {
+                    if(lo!=0)return false;
+                }
+                else {
+                    int hi=counted_sign(co,r.upper,result);
+                    if(lo==0||hi==0||lo==hi)return false;
+                }
+            }
+            return true;
+        }
+        bool inertia_rootset(const IntegerPencil& p,const std::vector<RootCertificate>& roots,
+                             unsigned digits,SolveResult& result) {
+            if(!valid_rows(roots,p.E.n,digits))return false;
+            for(std::size_t i=0;i<roots.size();++i) {
+                const auto& r=roots[i];
+                auto l=counted_inertia(p,r.lower,result);
+                if(r.lower==r.upper) {
+                    if(l.zero!=1||l.positive!=i)return false;
+                }
+                else {
+                    auto u=counted_inertia(p,r.upper,result);
+                    if(l.zero||u.zero||l.positive!=i+1||u.positive!=i)return false;
+                }
+            }
+            return true;
+        }
+        bool valid_matrix_shapes(const QMatrix& k,const QMatrix& m) {
+            return k.n>0&&k.n<=max_dimension&&k.n==m.n&&k.data.size()==k.n*k.n&&m.data.size()==m.n*m.n;
+        }
+        void compute_coefficients(const IntegerPencil& p,const Options& o,SolveResult& out,bool verify) {
+            if(o.progress)o.progress("Computing exact characteristic coefficients...");
+            auto timer=Clock::now();
+            auto c=characteristic(p.E,p.F);
+            out.coefficients_seconds=elapsed(timer);
+            out.coefficients=std::move(c.coefficients);
+            out.exact_divisions=c.exact_divisions;
+            out.max_coefficient_bits=c.max_coefficient_bits;
+            out.max_workspace_bits=c.max_workspace_bits;
+            if(verify) {
+                if(o.progress)o.progress("Checking polynomial at n+1 independent Bareiss determinants...");
+                out.oracle_workers=oracle_worker_count(o.oracle_workers,out.order+1);
+                timer=Clock::now();
+                out.coefficient_identity_verified=verify_coefficients(p.E,p.F,out.coefficients,out.oracle_workers);
+                out.oracle_seconds=elapsed(timer);
+                if(!out.coefficient_identity_verified)throw std::logic_error("independent determinant verification failed");
+            }
+        }
+        bool repeated_spectrum(SolveResult& out) {
+            auto timer=Clock::now();
+            auto squarefree=check_squarefree(out.coefficients);
+            out.squarefree_seconds=elapsed(timer);
+            out.squarefree_modular_prime=squarefree.modular_prime;
+            return squarefree.repeated;
+        }
+        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,const std::vector<Z>& coefficients,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
             if(approx<=0)return std::nullopt;
             const long scale=decimal_scale(approx);
             long places=std::max(static_cast<long>(digits)+8,9-scale);
@@ -116,22 +200,28 @@ namespace secular {
                 center.canonicalize();
                 Q radius(1,pow10(width));
                 Q lower=center-radius,upper=center+radius;
-                auto li=shifted_inertia(pencil.F,pencil.E,lower),ui=shifted_inertia(pencil.F,pencil.E,upper);
-                if(li.zero==1&&li.positive==index) {
-                    upper=lower;
+                if(polynomial) {
+                    int lo=counted_sign(coefficients,lower,result),hi=counted_sign(coefficients,upper,result);
+                    if(lo==0)upper=lower;
+                    else if(hi==0)lower=upper;
+                    else if(lo==hi)continue;
                 }
-                else if(ui.zero==1&&ui.positive==index) {
-                    lower=upper;
+                else {
+                    auto li=counted_inertia(pencil,lower,result),ui=counted_inertia(pencil,upper,result);
+                    if(li.zero==1&&li.positive==index)upper=lower;
+                    else if(ui.zero==1&&ui.positive==index)lower=upper;
+                    else if(li.zero||ui.zero||li.positive!=index+1||ui.positive!=index)continue;
                 }
-                else if(li.zero||ui.zero||li.positive!=index+1||ui.positive!=index)continue;
                 auto lo=round_scaled(lower,digits),hi=round_scaled(upper,digits);
                 if(lo!=hi) {
                     if(hi-lo!=1)continue;
                     Q midpoint(lo+hi,2*pow10(digits));
                     midpoint.canonicalize();
-                    if(evaluate(coefficients,midpoint)!=0)continue;
-                    auto mi=shifted_inertia(pencil.F,pencil.E,midpoint);
-                    if(mi.zero!=1||mi.positive!=index)continue;
+                    if(counted_sign(coefficients,midpoint,result)!=0)continue;
+                    if(!polynomial) {
+                        auto mi=counted_inertia(pencil,midpoint,result);
+                        if(mi.zero!=1||mi.positive!=index)continue;
+                    }
                     lower=upper=midpoint;
                     lo=round_scaled(midpoint,digits);
                 }
@@ -144,7 +234,7 @@ namespace secular {
             }
             return std::nullopt;
         }
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,const std::vector<Z>& co,const std::vector<Real>& candidates,unsigned digits,unsigned work) {
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,const std::vector<Z>& co,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
             std::vector<Q> approximations;
             for(const auto& candidate:candidates)approximations.push_back(rational(candidate));
             std::vector<RootCertificate> out;
@@ -157,11 +247,12 @@ namespace secular {
                     if(gap<=0)return {};
                     if(separation==0||gap<separation)separation=gap;
                 }
-                auto r=certify_one(p,co,approximations[i],separation,i,digits,work);
+                auto r=certify_one(p,co,approximations[i],separation,i,digits,work,polynomial,result);
                 if(!r)return {};
                 out.push_back(std::move(*r));
             }
-            for(std::size_t i=1;i<out.size();++i)if(out[i].upper>=out[i-1].lower)return {};
+            if(!valid_rows(out,p.E.n,digits))return {};
+            if(polynomial&&!polynomial_rootset(out,co,p.E.n,digits,result))return {};
             return out;
         }
         std::string escape(const std::string& s) {
@@ -187,34 +278,24 @@ namespace secular {
     }
     void validate_options(const Options& o) {
         if(o.digits<1||o.digits>1000||o.precision<32||o.max_precision<o.precision||o.max_precision>20000||o.max_squarings<1||o.max_squarings>512)throw std::invalid_argument("invalid resource limits (digits 1..1000, precision 32..20000, squarings 1..512)");
+        if(o.oracle_workers>64)throw std::invalid_argument("oracle workers must be 0..64");
     }
     SolveResult solve(const QMatrix& k,const QMatrix& m,const Options& o) {
         auto begin=Clock::now();
-        if(k.n!=m.n)throw std::invalid_argument("K and M dimensions differ");
+        if(!valid_matrix_shapes(k,m))throw std::invalid_argument("invalid or mismatched K and M dimensions");
         validate_options(o);
         if(!symmetric(k)||!symmetric(m))throw std::invalid_argument("root recovery requires symmetric K and M");
         auto p=integer_pencil(k,m);
-        if(inertia(p.E).positive!=k.n)throw std::invalid_argument("root recovery requires positive definite M");
-        if(inertia(p.F).positive!=k.n)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
         SolveResult out;
         out.order=k.n;
         out.determinant_scale=p.scale;
-        if(o.progress)o.progress("Computing exact characteristic coefficients...");
-        auto timer=Clock::now();
-        auto c=characteristic(p.E,p.F);
-        out.coefficients_seconds=elapsed(timer);
-        out.coefficients=c.coefficients;
-        out.exact_divisions=c.exact_divisions;
-        out.max_coefficient_bits=c.max_coefficient_bits;
-        out.max_workspace_bits=c.max_workspace_bits;
-        if(o.full_coefficient_check) {
-            if(o.progress)o.progress("Checking polynomial at n+1 independent Bareiss determinants...");
-            timer=Clock::now();
-            out.coefficient_identity_verified=verify_coefficients(p.E,p.F,out.coefficients);
-            out.oracle_seconds=elapsed(timer);
-            if(!out.coefficient_identity_verified)throw std::logic_error("independent determinant verification failed");
-        }
-        if(o.check_squarefree&&has_repeated_roots(out.coefficients)) {
+        ++out.inertia_evaluations;
+        if(inertia(p.E).positive!=k.n)throw std::invalid_argument("root recovery requires positive definite M");
+        ++out.inertia_evaluations;
+        if(inertia(p.F).positive!=k.n)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
+        out.initialization_seconds=elapsed(begin);
+        compute_coefficients(p,o,out,o.full_coefficient_check);
+        if(o.check_squarefree&&repeated_spectrum(out)) {
             out.status="REPEATED_SPECTRUM";
             out.message="Exact polynomial gcd detects a repeated root; simple-root Graeffe certification is not applicable.";
             out.total_seconds=elapsed(begin);
@@ -255,15 +336,24 @@ namespace secular {
                     previous=candidates;
                     if((stable&&step>=next_certification)||step==o.max_squarings) {
                         out.graeffe_seconds+=elapsed(gt);
-                        if(o.progress)o.progress("Testing exact inertia and decimal rounding after "+std::to_string(step)+" squarings...");
+                        const bool try_polynomial=o.polynomial_certification&&out.coefficient_identity_verified;
+                        if(o.progress)o.progress(std::string("Testing ")+(try_polynomial?"exact full-spectrum polynomial proof":"exact inertia")+" and decimal rounding after "+std::to_string(step)+" squarings...");
                         auto ct=Clock::now();
-                        auto roots=certify_all(p,out.coefficients,candidates,o.digits,work);
+                        std::vector<RootCertificate> roots;
+                        std::string method="exact_inertia";
+                        if(try_polynomial) {
+                            roots=certify_all(p,out.coefficients,candidates,o.digits,work,true,out);
+                            if(roots.size()==k.n)method="polynomial";
+                        }
+                        if(roots.size()!=k.n)roots=certify_all(p,out.coefficients,candidates,o.digits,work,false,out);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);
                             out.certified=true;
                             out.status="CERTIFIED";
-                            out.message="All eigenvalues isolated, indexed and correctly rounded by exact inertia.";
+                            out.certification_method=method;
+                            out.message="All eigenvalues isolated, indexed and correctly rounded by "+
+                                std::string(method=="polynomial"?"an exact full-spectrum polynomial proof.":"exact inertia.");
                             out.total_seconds=elapsed(begin);
                             return out;
                         }
@@ -291,32 +381,63 @@ namespace secular {
         out.total_seconds=elapsed(begin);
         return out;
     }
-    bool verify_root_certificates(const QMatrix& k,const QMatrix& m,const std::vector<RootCertificate>& roots,unsigned digits) {
+    SolveResult verify_certificates(const QMatrix& k,const QMatrix& m,const std::vector<RootCertificate>& roots,unsigned digits,const Options& o) {
+        const auto begin=Clock::now();
+        SolveResult out;
+        out.status="FAILED";
+        out.order=k.n;
         try {
-            if(digits<1||digits>1000||k.n!=m.n||roots.size()!=k.n||!symmetric(k)||!symmetric(m))return false;
+            validate_options(o);
+            if(digits<1||digits>1000||!valid_matrix_shapes(k,m)||!symmetric(k)||!symmetric(m))
+                throw std::invalid_argument("invalid certificate precision or matrix dimensions/symmetry");
             auto p=integer_pencil(k,m);
-            if(inertia(p.E).positive!=k.n||inertia(p.F).positive!=k.n)return false;
-            for(std::size_t i=0;i<roots.size();++i) {
-                const auto& r=roots[i];
-                if(r.index!=i||r.lower>r.upper||r.radius<0||(i&&r.upper>=roots[i-1].lower))return false;
-                Q printed=parse_rational(r.decimal);
-                if(format_decimal(round_scaled(printed,digits),digits)!=r.decimal)return false;
-                if(format_decimal(round_scaled(r.lower,digits),digits)!=r.decimal||format_decimal(round_scaled(r.upper,digits),digits)!=r.decimal)return false;
-                if(r.radius<qabs(printed-r.lower)||r.radius<qabs(printed-r.upper))return false;
-                auto l=shifted_inertia(p.F,p.E,r.lower);
-                if(r.lower==r.upper) {
-                    if(l.zero!=1||l.positive!=i)return false;
+            out.determinant_scale=p.scale;
+            ++out.inertia_evaluations;
+            if(inertia(p.E).positive!=k.n)throw std::invalid_argument("verification requires positive definite M");
+            ++out.inertia_evaluations;
+            if(inertia(p.F).positive!=k.n)throw std::invalid_argument("verification requires positive definite K");
+            out.initialization_seconds=elapsed(begin);
+            if(o.polynomial_certification) {
+                // Verification starts with the original matrices; neither saved
+                // coefficient files nor a previous status can authorize a proof.
+                compute_coefficients(p,o,out,true);
+                if(repeated_spectrum(out))throw std::invalid_argument("repeated spectrum cannot have a complete distinct-root certificate");
+            }
+            auto timer=Clock::now();
+            bool accepted=false;
+            try {
+                if(o.polynomial_certification&&polynomial_rootset(roots,out.coefficients,k.n,digits,out)) {
+                    accepted=true;
+                    out.certification_method="polynomial";
                 }
-                else {
-                    auto u=shifted_inertia(p.F,p.E,r.upper);
-                    if(l.zero||u.zero||l.positive!=i+1||u.positive!=i)return false;
+                else if(inertia_rootset(p,roots,digits,out)) {
+                    accepted=true;
+                    out.certification_method="exact_inertia";
                 }
             }
-            return true;
+            catch(...) {
+                out.certification_seconds=elapsed(timer);
+                throw;
+            }
+            out.certification_seconds=elapsed(timer);
+            if(accepted) {
+                out.certified=true;
+                out.status="VERIFIED";
+                out.roots=roots;
+                out.message="All certificate rows verified against the original matrices by "+
+                    std::string(out.certification_method=="polynomial"?"an exact full-spectrum polynomial proof.":"exact inertia.");
+            }
+            else out.message="Certificate rows failed exact root, ordering, radius or decimal checks.";
         }
-        catch(const std::exception&) {
-            return false;
+        catch(const std::exception& ex) {
+            out.message=ex.what();
+            if(out.initialization_seconds==0)out.initialization_seconds=elapsed(begin);
         }
+        out.total_seconds=elapsed(begin);
+        return out;
+    }
+    bool verify_root_certificates(const QMatrix& k,const QMatrix& m,const std::vector<RootCertificate>& roots,unsigned digits) {
+        return verify_certificates(k,m,roots,digits).certified;
     }
     void write_certificates(std::ostream& out,const std::vector<RootCertificate>& roots,unsigned digits) {
         out<<"# SecularLab certificates v1\n# decimal_places="<<digits<<"\nindex\tdecimal\tlower\tupper\tradius\n";
@@ -358,7 +479,35 @@ namespace secular {
         return r;
     }
     void write_result_json(std::ostream& out,const SolveResult& r,unsigned digits) {
-        out<<std::setprecision(12)<<"{\n  \"schema\": \"SecularLab-1\",\n  \"status\": \""<<r.status<<"\",\n  \"message\": \""<<escape(r.message)<<"\",\n  \"certified\": "<<(r.certified?"true":"false")<<",\n  \"order\": "<<r.order<<",\n  \"decimal_places\": "<<digits<<",\n  \"working_decimal_digits\": "<<r.working_digits<<",\n  \"graeffe_squarings\": "<<r.graeffe_steps<<",\n  \"precision_attempts\": "<<r.attempts<<",\n  \"exact_divisions\": "<<r.exact_divisions<<",\n  \"coefficient_bits_max\": "<<r.max_coefficient_bits<<",\n  \"recurrence_workspace_bits_max\": "<<r.max_workspace_bits<<",\n  \"coefficient_identity_verified\": "<<(r.coefficient_identity_verified?"true":"false")<<",\n  \"certified_eigenvalues\": "<<r.roots.size()<<",\n  \"times_seconds\": {\"coefficients\": "<<r.coefficients_seconds<<", \"coefficient_oracle\": "<<r.oracle_seconds<<", \"graeffe\": "<<r.graeffe_seconds<<", \"certification\": "<<r.certification_seconds<<", \"total\": "<<r.total_seconds<<"},\n  \"denominator_clearing_multiplier\": \""<<r.determinant_scale<<"\",\n  \"gmp_version\": \""<<gmp_version<<"\",\n  \"candidate_backend\": \"Boost.Multiprecision GMP float (untrusted)\"\n}\n";
+        out<<std::setprecision(12)<<"{\n  \"schema\": \"SecularLab-1\",\n"
+           <<"  \"status\": \""<<r.status<<"\",\n"
+           <<"  \"message\": \""<<escape(r.message)<<"\",\n"
+           <<"  \"certified\": "<<(r.certified?"true":"false")<<",\n"
+           <<"  \"certification_method\": \""<<r.certification_method<<"\",\n"
+           <<"  \"order\": "<<r.order<<",\n"
+           <<"  \"decimal_places\": "<<digits<<",\n"
+           <<"  \"working_decimal_digits\": "<<r.working_digits<<",\n"
+           <<"  \"graeffe_squarings\": "<<r.graeffe_steps<<",\n"
+           <<"  \"precision_attempts\": "<<r.attempts<<",\n"
+           <<"  \"exact_divisions\": "<<r.exact_divisions<<",\n"
+           <<"  \"coefficient_bits_max\": "<<r.max_coefficient_bits<<",\n"
+           <<"  \"recurrence_workspace_bits_max\": "<<r.max_workspace_bits<<",\n"
+           <<"  \"coefficient_identity_verified\": "<<(r.coefficient_identity_verified?"true":"false")<<",\n"
+           <<"  \"oracle_workers\": "<<r.oracle_workers<<",\n"
+           <<"  \"squarefree_modular_prime\": "<<r.squarefree_modular_prime<<",\n"
+           <<"  \"polynomial_sign_evaluations\": "<<r.polynomial_sign_evaluations<<",\n"
+           <<"  \"inertia_evaluations\": "<<r.inertia_evaluations<<",\n"
+           <<"  \"certified_eigenvalues\": "<<r.roots.size()<<",\n"
+           <<"  \"times_seconds\": {\"initialization\": "<<r.initialization_seconds
+           <<", \"coefficients\": "<<r.coefficients_seconds
+           <<", \"coefficient_oracle\": "<<r.oracle_seconds
+           <<", \"squarefree\": "<<r.squarefree_seconds
+           <<", \"graeffe\": "<<r.graeffe_seconds
+           <<", \"certification\": "<<r.certification_seconds
+           <<", \"total\": "<<r.total_seconds<<"},\n"
+           <<"  \"denominator_clearing_multiplier\": \""<<r.determinant_scale<<"\",\n"
+           <<"  \"gmp_version\": \""<<gmp_version<<"\",\n"
+           <<"  \"candidate_backend\": \"Boost.Multiprecision GMP float (untrusted)\"\n}\n";
         if(!out)throw std::runtime_error("JSON output failed");
     }
 }

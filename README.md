@@ -75,10 +75,14 @@ build/release/secular solve --matrix matrices/oilrig/bcsstk02.mtx --mass matrice
 ### Recheck the saved certificate
 
 ```bash
-build/release/secular verify --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --cert results/oilrig50/eigenvalues.tsv
+build/release/secular verify --matrix matrices/oilrig/bcsstk02.mtx --mass matrices/oilrig/bcsstm02.mtx --cert results/oilrig50/eigenvalues.tsv --workers 8 --out results/oilrig50-replay
 ```
 
-The `verify` subcommand does not trust the JSON status, floating-point candidates, or coefficient file. It recomputes exact inertia of the supplied matrices at the stored rational endpoints.
+In its default `auto` mode, the `verify` subcommand derives its characteristic polynomial from the supplied matrices. It independently checks the complete determinant identity and squarefreeness before trying the polynomial proof of all saved intervals, with exact inertia as a fallback. Inertia-only replay checks the original pencil directly without constructing that polynomial. Saved JSON status, floating-point candidates, and coefficient files are never trusted. The optional `--out` saves a detailed `result.json` in a new or empty directory; replay without `--out` still works. Output begins with `VERIFIED` or `FAILED` and reports the actual proof method and elapsed time.
+
+For `solve` and `verify`, `--certification auto` is the default. Use `--certification inertia` to request the original exact-inertia proof directly. `--no-coefficient-check` is available for solve and coefficients; a solve with this option always uses inertia certification. Verify rejects this option, so it cannot weaken the independent proof.
+
+All three commands accept `--workers 0..64` for independent determinant-oracle checks, including the affine coefficient grid. The default `0` chooses a hardware-based count capped at 8. Explicit counts from 1 through 64 are capped by the number of oracle jobs; `--workers 1` requests serial checking. Each successful identity check still evaluates all `n+1` distinct points exactly.
 
 ### Small example / debugger
 
@@ -119,19 +123,24 @@ build/release/secular solve --matrix matrices/examples/cluster3.mtx --digits 100
 - Exact parsing of integers, finite decimals, scientific `e/E/d/D` notation, and rational `p/q` tokens.
 - Denominator clearing, Faddeev-LeVerrier/adjugate recurrence, checked integer divisions and `S_n=0`.
 - Direct Bareiss determinant checks at `n+1` distinct points, proving the whole coefficient polynomial identity.
+- Parallel determinant checks with private exact-arithmetic scratch space and configurable worker count.
+- A sufficient modular squarefree proof over fixed verified primes. A degree drop or nontrivial modular gcd is inconclusive and leads to another prime or the existing exact gcd fallback; it never alone establishes repeated roots.
 - Formal affine coefficient polynomials for `det(zE-F0-tF1)`.
 - Signed-logarithmic Graeffe iteration, avoiding giant repeatedly squared coefficients. No external eigensolver or Newton polishing supplies its roots.
 - Exact symmetric inertia with a fraction-free path and a rational block-LDL fallback for zero diagonal pivots.
 - Exact rational root intervals, index verification, correct half-away-from-zero decimal rounding, and radii about the printed values.
+- Exact polynomial signs via homogeneous integer evaluation at rational endpoints. Once the matrix-derived degree-`n` characteristic identity is verified, `n` disjoint brackets with strict opposite signs or exact singleton zeros exhaust all roots. This full-spectrum argument does not certify a partial spectrum. Ambiguous endpoint cases retain the exact-inertia fallback.
 - Portable TSV certificates, separate replay, CSV/TSV-compatible coefficient records and JSON execution summaries.
 
 See `docs/ALGORITHM.md` for the correspondence with the paper, actual proof obligations and limitations.
+
+JSON summaries add `certification_method` (`polynomial`, `exact_inertia`, or `none`), the actual `oracle_workers`, `squarefree_modular_prime` (zero means no modular witness: exact fallback or a check that was not run, as in inertia-only replay), and counts of polynomial-sign and inertia evaluations (including the two mandatory positive-definiteness checks). `times_seconds.initialization` and `times_seconds.squarefree` supplement the existing phase timings and total time. Coefficient and certificate TSV formats are unchanged, as are the requested decimal places and exact half-away-from-zero rounding; `--digits 50` still requests 50 places after the decimal point.
 
 ## Supported scope and honest limitations
 
 **Root solving:** symmetric positive definite `K` and `M`, with a simple spectrum. Repeated roots are detected exactly and reported as `REPEATED_SPECTRUM`. Indefinite/nonsymmetric problems are not silently shifted, approximated by symmetric matrices, or passed to a different eigensolver. **Coefficient construction** permits nonsymmetric inputs with any nonsingular leading `M`.
 
-The implementation is dense, single-threaded and intended as a reproducible research reference, not a replacement for fast sparse eigensolvers. Limits are order 256 (formal affine mode: 24), requested decimal places 1..1000, candidate working precision 32..20000, at most 512 Graeffe squarings, and Legendre degree at most 10000. Some permitted inputs can exhaust time or memory or fail to certify within the configured limits.
+The implementation is dense and intended as a reproducible research reference, not a replacement for fast sparse eigensolvers. Independent determinant identity checks can run in parallel; coefficient construction and Graeffe recovery remain serial. Limits are order 256 (formal affine mode: 24), requested decimal places 1..1000, candidate working precision 32..20000, at most 512 Graeffe squarings, and Legendre degree at most 10000. Some permitted inputs can exhaust time or memory or fail to certify within the configured limits.
 
 Exact arithmetic uses **GMP**. Candidates use **Boost.Multiprecision's GMP floating-point backend**, not MPFR. Their logarithms and exponentials are untrusted approximations; acceptance is exact and independent of their error estimates. This backend choice differs from the manuscript's historical/native programs. No claim of formal C++ verification is made. Because the floating-point default precision is process-global, concurrent calls to `solve` in one process are not supported.
 
@@ -143,7 +152,7 @@ The certificate refers to the matrix whose published entries are interpreted as 
 ctest --preset release --output-on-failure
 ```
 
-The five standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, CLI examples, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, and disjoint certificates for tiny roots. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
+The standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, fast exact arithmetic, both certification methods, CLI examples, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, disjoint certificates for tiny roots, serial/parallel artifact equivalence, altered certificates, matrix mismatch, and replay independent of saved coefficient/status files. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
 
 Optional slow full-matrix solve plus certificate replay:
 
