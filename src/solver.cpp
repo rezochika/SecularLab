@@ -408,7 +408,9 @@ namespace secular {
         void compute_coefficients(const IntegerPencil& p,const Options& o,SolveResult& out,bool verify) {
             if(o.progress)o.progress("Computing exact characteristic coefficients...");
             auto timer=Clock::now();
-            auto c=characteristic(p.E,p.F,o.oracle_workers);
+            // The recurrence runs on an exactly reduced pencil and maps its coefficients back;
+            // the oracle below still checks them against the original pencil.
+            auto c=reduced_characteristic(p.E,p.F,o.oracle_workers);
             out.coefficients_seconds=elapsed(timer);
             out.coefficients=std::move(c.coefficients);
             out.exact_divisions=c.exact_divisions;

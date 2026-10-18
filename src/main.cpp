@@ -208,7 +208,8 @@ int main(int argc,char** argv) {
                 return 0;
             }
             auto p=integer_pencil(k,m);
-            auto co=characteristic(p.E,p.F,o.oracle_workers);
+            // The recurrence runs on the reduced pencil; the oracle checks the original one.
+            auto co=reduced_characteristic(p.E,p.F,o.oracle_workers);
             OracleReport oracle;
             if(check)oracle=check_coefficients(p.E,p.F,co.coefficients,o.oracle_workers,o.coefficient_oracle);
             if(check&&!oracle.verified)throw std::logic_error("coefficient identity failed");

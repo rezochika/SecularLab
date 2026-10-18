@@ -987,6 +987,108 @@ namespace secular {
         for(auto& c:r.coefficients)r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(c));
         return r;
     }
+    namespace {
+        // Exponents a_i >= 0 with a_i+a_j <= v_q(A_ij) for every nonzero entry of E and F. The
+        // start a_i = floor(min_j v_q / 2) over row and column i is feasible; each coordinate is
+        // then raised to its largest feasible value, in a fixed order. Every feasible choice
+        // gives an exact reduction; the ascent only aims at a large sum.
+        std::vector<unsigned long> congruence_exponents(const ZMatrix& e,const ZMatrix& f,unsigned long q) {
+            const auto n=e.n;
+            constexpr auto unbounded=std::numeric_limits<unsigned long>::max();
+            std::vector<std::vector<std::pair<std::size_t,unsigned long>>> limits(n);
+            std::vector<unsigned long> cap(n,unbounded);
+            const Z prime=q;
+            Z rest;
+            for(const ZMatrix* a: {
+                &e,&f
+            })for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+                const Z& entry=(*a)(i,j);
+                if(entry==0)continue;
+                const unsigned long v=q==2?mpz_scan1(entry.get_mpz_t(),0):
+                    mpz_remove(rest.get_mpz_t(),entry.get_mpz_t(),prime.get_mpz_t());
+                limits[i].emplace_back(j,v);
+                if(i!=j)limits[j].emplace_back(i,v);
+                cap[i]=std::min(cap[i],v);
+                cap[j]=std::min(cap[j],v);
+            }
+            std::vector<unsigned long> exponent(n);
+            for(std::size_t i=0;i<n;++i)exponent[i]=cap[i]==unbounded?0:cap[i]/2;
+            for(bool changed=true;changed;) {
+                changed=false;
+                for(std::size_t i=0;i<n;++i) {
+                    unsigned long best=unbounded;
+                    // Feasibility gives v >= exponent[i]+exponent[j], so v-exponent[j] cannot wrap.
+                    for(const auto& [j,v]:limits[i])best=std::min(best,j==i?v/2:v-exponent[j]);
+                    if(best!=unbounded&&best>exponent[i]) {
+                        exponent[i]=best;
+                        changed=true;
+                    }
+                }
+            }
+            return exponent;
+        }
+        Z content(const ZMatrix& a) {
+            Z g=0;
+            for(const auto& v:a.data)mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),v.get_mpz_t());
+            return g==0?Z(1):g;
+        }
+    }
+    PencilReduction reduce_pencil(const ZMatrix& e,const ZMatrix& f) {
+        if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
+        const auto n=e.n;
+        if(n==0||e.data.size()!=n*n||f.data.size()!=n*n)throw std::invalid_argument("invalid pencil storage");
+        PencilReduction r {
+            e,f,std::vector<Z>(n,1),1,1,true
+        };
+        for(unsigned long q: {
+            2UL,5UL
+        }) {
+            const auto exponent=congruence_exponents(e,f,q);
+            for(std::size_t i=0;i<n;++i)if(exponent[i]) {
+                Z power;
+                mpz_ui_pow_ui(power.get_mpz_t(),q,exponent[i]);
+                r.scale[i]*=power;
+                r.trivial=false;
+            }
+        }
+        // E' = P^-1 E P^-1 and F' = P^-1 F P^-1 by checked exact divisions, then their contents.
+        if(!r.trivial)for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+            const Z d=r.scale[i]*r.scale[j];
+            if(d==1)continue;
+            r.E(i,j)=exact_divide(e(i,j),d);
+            r.F(i,j)=exact_divide(f(i,j),d);
+        }
+        r.e_content=content(r.E);
+        r.f_content=content(r.F);
+        for(auto [a,g]: {
+            std::pair<ZMatrix*,const Z*>{&r.E,&r.e_content},std::pair<ZMatrix*,const Z*>{&r.F,&r.f_content}
+        })if(*g!=1) {
+            for(auto& v:a->data)v=exact_divide(v,*g);
+            r.trivial=false;
+        }
+        return r;
+    }
+    CoefficientResult reduced_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers) {
+        const auto reduction=reduce_pencil(e,f);
+        if(reduction.trivial)return characteristic(e,f,workers);
+        auto r=characteristic(reduction.E,reduction.F,workers);
+        // c_k = c'_k alpha^(n-k) beta^k prod(scale)^2, by exact integer multiplication only.
+        const auto n=e.n;
+        Z square=1;
+        for(const auto& s:reduction.scale)square*=s;
+        square*=square;
+        std::vector<Z> alpha(n+1,Z(1)),beta(n+1,Z(1));
+        for(std::size_t k=1;k<=n;++k) {
+            alpha[k]=alpha[k-1]*reduction.e_content;
+            beta[k]=beta[k-1]*reduction.f_content;
+        }
+        r.max_coefficient_bits=0;
+        for(std::size_t k=0;k<=n;++k) {
+            r.coefficients[k]*=alpha[n-k]*beta[k]*square;
+            r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(r.coefficients[k]));
+        }
+        return r;
+    }
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1) {
         if(e.n!=f0.n||e.n!=f1.n)throw std::invalid_argument("affine dimensions differ");
         if(e.n>24)throw std::invalid_argument("symbolic affine mode limited to order 24");

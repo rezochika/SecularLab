@@ -78,6 +78,21 @@ namespace secular {
     // Workers as for oracle_worker_count, clamped to the n rows of a stage.
     // Every worker count gives identical results.
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
+    // An exact diagonal congruence and content reduction: E = alpha*P*E'*P and F = beta*P*F'*P,
+    // with P = diag(scale) and every scale entry a product of powers of 2 and 5. Then
+    // det(zE-F) = prod(scale)^2 * sum_k c'_k alpha^(n-k) beta^k z^(n-k), where c' are the
+    // coefficients of det(zE'-F'). Zero entries, symmetry and a diagonal E are preserved.
+    struct PencilReduction {
+        ZMatrix E,F;
+        std::vector<Z> scale;
+        Z e_content,f_content;
+        // True when P=I and alpha=beta=1, so E',F' equal the input.
+        bool trivial=true;
+    };
+    PencilReduction reduce_pencil(const ZMatrix& e,const ZMatrix& f);
+    // characteristic() of the reduced pencil, mapped back exactly to det(zE-F). The coefficients
+    // are identical to characteristic(e,f); the workspace statistic measures the reduced pencil.
+    CoefficientResult reduced_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
     // Output [k][j] is coefficient of z^(n-k) t^j in det(zE-F0-tF1).
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1);
     Z evaluate(const std::vector<Z>& coefficients,const Z& x);

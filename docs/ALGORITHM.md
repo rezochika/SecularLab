@@ -63,6 +63,30 @@ entry is the same exact integer for any schedule, and a failure reports the lowe
 Every division that is performed is still checked, and S_n=0 is tested on every stored entry.
 For symmetric pencils, symmetry makes the skipped lower-triangle divisions and tests redundant.
 
+### Exact 2-adic and 5-adic reduction
+
+Clearing decimal denominators multiplies every entry by the same L, and decimal inputs carry
+further powers of 2 and 5. Before the recurrence, the solver and the `coefficients` command
+remove that structure by an exact congruence. For each prime q in {2,5}, exponents a_i >= 0
+are chosen with a_i + a_j <= v_q(E_ij) and a_i + a_j <= v_q(F_ij) for every nonzero entry; a
+diagonal entry needs 2a_i <= v_q. The start a_i = floor(min_j v_q/2) over row and column i is
+feasible. Each a_i is then raised, in a fixed order, to the largest value the others allow.
+With P = diag(p_i), p_i = 2^(a_i) 5^(b_i), the pencil E' = P^-1 E P^-1, F' = P^-1 F P^-1 is formed
+by checked exact divisions. Then alpha = content(E') and beta = content(F') are divided out,
+again exactly, giving E'' and F''. The exact identities
+
+    det(zE-F) = (prod_i p_i)^2 det(zE'-F'),
+    det(z alpha E'' - beta F'') = sum_k c''_k alpha^(n-k) beta^k z^(n-k)
+
+give c_k = c''_k alpha^(n-k) beta^k (prod_i p_i)^2, where c'' are the coefficients of
+det(zE''-F''). That map uses only integer multiplication. The unchanged recurrence, with all its
+divisibility and S_n=0 checks, runs on (E'',F''). P keeps zero entries, symmetry and a diagonal
+E, so the same symmetric and diagonal paths apply. Any feasible exponents give the same
+coefficients; P=I and alpha=beta=1 is the trivial case. The coefficient oracle below still checks
+the mapped coefficients against the original (E,F), so the proof does not depend on the
+reduction. On BCSSTK05 the largest workspace entry falls from 13150 to 9111 bits, and most
+reduced stiffness entries fit one 64-bit limb.
+
 By default the result is then checked independently of the recurrence by a multimodular
 characteristic polynomial (`--oracle auto`). For a prime p not dividing det E, det(zE-F) =
 det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced to upper Hessenberg form by
@@ -311,9 +335,12 @@ The `recurrence_workspace_bits_max` field measures the largest entry of T_k-c_k 
 the sampled recurrence stages, not the peak bit length of every GMP temporary. When only the
 upper triangle of T_k is formed (symmetric pencil, diagonal E), each entry below the diagonal is
 measured as E_jj*S_k(i,j), which equals it exactly. It is formed only when it could raise the
-maximum, so the field keeps its full-matrix meaning.
+maximum, so the field keeps its full-matrix meaning. It measures the recurrence actually run, on
+the reduced pencil (E'',F''); it equals the unreduced value only when the reduction is trivial.
+`coefficient_bits_max` is measured after the coefficients are mapped back.
 `exact_divisions` counts the divisions the coefficient recurrence actually performs: one trace
 division per stage, plus n(n+1)/2 entry divisions per stage for symmetric pencils, or n^2
-otherwise. It excludes those inside Bareiss elimination, the oracles or the inertia routine.
+otherwise. It excludes those inside Bareiss elimination, the reduction, the oracles or the
+inertia routine.
 `coefficient_oracle` names the oracle that decided the identity, `oracle_moduli` the primes of a
 modular decision, and `oracle_workers` and `recurrence_workers` the threads actually used.
