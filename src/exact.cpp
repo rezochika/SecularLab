@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <system_error>
 #include <thread>
 
 namespace secular {
@@ -49,10 +50,14 @@ namespace secular {
             for(std::size_t k=0;k<a.n;++k)std::swap(a(i,k),a(j,k));
             for(std::size_t k=0;k<a.n;++k)std::swap(a(k,i),a(k,j));
         }
-        Inertia rational_inertia(QMatrix a) {
+        void poll(const CancelCheck& cancelled) {
+            if(cancelled&&cancelled())throw Cancelled {};
+        }
+        Inertia rational_inertia(QMatrix a,const CancelCheck& cancelled) {
             Inertia out;
             const auto n=a.n;
             for(std::size_t k=0;k<n;) {
+                poll(cancelled);
                 std::size_t p=k;
                 while(p<n&&a(p,p)==0)++p;
                 if(p<n) {
@@ -816,39 +821,56 @@ namespace secular {
         }
         return result;
     }
-    Inertia inertia(const ZMatrix& original) {
-        if(!symmetric(original))throw std::invalid_argument("inertia requires symmetric matrix");
-        ZMatrix a=original;
-        Inertia out;
-        Z previous=1;
-        for(std::size_t k=0;k<a.n;++k) {
-            std::size_t p=k;
-            while(p<a.n&&a(p,p)==0)++p;
-            if(p==a.n) {
-                bool zero=true;
-                for(std::size_t i=k;i<a.n;++i)for(std::size_t j=k;j<a.n;++j)if(a(i,j)!=0)zero=false;
-                if(zero) {
-                    out.zero+=a.n-k;
-                    return out;
+    namespace {
+        // The fraction-free inertia, polling `cancelled` once per pivot.
+        Inertia eliminate(const ZMatrix& original,const CancelCheck& cancelled) {
+            if(!symmetric(original))throw std::invalid_argument("inertia requires symmetric matrix");
+            Inertia out;
+            if(diagonal(original)) {
+                // The eigenvalues of a diagonal matrix are its diagonal entries.
+                for(std::size_t i=0;i<original.n;++i) {
+                    const int sign=mpz_sgn(original(i,i).get_mpz_t());
+                    if(sign>0)++out.positive;
+                    else if(sign<0)++out.negative;
+                    else ++out.zero;
                 }
-                QMatrix q(a.n);
-                for(std::size_t i=0;i<original.data.size();++i)q.data[i]=original.data[i];
-                return rational_inertia(std::move(q));
+                return out;
             }
-            swap_symmetric(a,k,p);
-            Z pivot=a(k,k);
-            int sign=mpz_sgn(pivot.get_mpz_t())*mpz_sgn(previous.get_mpz_t());
-            if(sign>0)++out.positive;
-            else ++out.negative;
-            for(std::size_t i=k+1;i<a.n;++i)for(std::size_t j=i;j<a.n;++j) {
-                Z v=pivot*a(i,j)-a(i,k)*a(k,j);
-                v=exact_divide(v,previous);
-                a(i,j)=v;
-                a(j,i)=v;
+            ZMatrix a=original;
+            Z previous=1;
+            for(std::size_t k=0;k<a.n;++k) {
+                poll(cancelled);
+                std::size_t p=k;
+                while(p<a.n&&a(p,p)==0)++p;
+                if(p==a.n) {
+                    bool zero=true;
+                    for(std::size_t i=k;i<a.n;++i)for(std::size_t j=k;j<a.n;++j)if(a(i,j)!=0)zero=false;
+                    if(zero) {
+                        out.zero+=a.n-k;
+                        return out;
+                    }
+                    QMatrix q(a.n);
+                    for(std::size_t i=0;i<original.data.size();++i)q.data[i]=original.data[i];
+                    return rational_inertia(std::move(q),cancelled);
+                }
+                swap_symmetric(a,k,p);
+                Z pivot=a(k,k);
+                int sign=mpz_sgn(pivot.get_mpz_t())*mpz_sgn(previous.get_mpz_t());
+                if(sign>0)++out.positive;
+                else ++out.negative;
+                for(std::size_t i=k+1;i<a.n;++i)for(std::size_t j=i;j<a.n;++j) {
+                    Z v=pivot*a(i,j)-a(i,k)*a(k,j);
+                    v=exact_divide(v,previous);
+                    a(i,j)=v;
+                    a(j,i)=v;
+                }
+                previous=std::move(pivot);
             }
-            previous=std::move(pivot);
+            return out;
         }
-        return out;
+    }
+    Inertia inertia(const ZMatrix& a) {
+        return eliminate(a,{});
     }
     Inertia inertia(const QMatrix& a) {
         if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
@@ -857,6 +879,168 @@ namespace secular {
         ZMatrix b(a.n);
         for(std::size_t i=0;i<a.data.size();++i)b.data[i]=a.data[i].get_num()*exact_divide(l,a.data[i].get_den());
         return inertia(b);
+    }
+    namespace {
+        std::optional<Inertia> dominant_congruence(const ZMatrix& a,const ZMatrix& x,const CancelCheck& cancelled) {
+            if(a.n!=x.n)throw std::invalid_argument("congruence dimensions differ");
+            if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+            const auto n=a.n;
+            // Upper triangular with a nonzero diagonal, so det(x)!=0 and x^T*a*x is a congruence.
+            for(std::size_t i=0;i<n;++i) {
+                if(x(i,i)==0)return std::nullopt;
+                for(std::size_t j=0;j<i;++j)if(x(i,j)!=0)return std::nullopt;
+            }
+            // B = x^T*c with c = a*x. Both are needed only on and above the diagonal: b(i,j), i<=j,
+            // reads c(m,j) for m<=i, and c(m,j) reads x(l,j) for l<=j.
+            ZMatrix c(n);
+            for(std::size_t m=0;m<n;++m) {
+                poll(cancelled);
+                for(std::size_t l=0;l<n;++l) {
+                    const auto aml=a(m,l).get_mpz_t();
+                    if(mpz_sgn(aml)==0)continue;
+                    for(std::size_t j=std::max(l,m);j<n;++j) {
+                        const auto xlj=x(l,j).get_mpz_t();
+                        if(mpz_sgn(xlj)!=0)mpz_addmul(c(m,j).get_mpz_t(),aml,xlj);
+                    }
+                }
+            }
+            // B is formed one row at a time and not kept. Row i of the upper triangle completes the
+            // off-diagonal sum of row i, because b(k,i), k<i, came with the earlier rows, and adds
+            // its entries to the sums of the later rows. A failing row ends the check at once.
+            // A strictly diagonally dominant symmetric B is nonsingular, and so is every
+            // diag(B)+t(B-diag(B)), 0<=t<=1. No eigenvalue crosses zero along that path, so B,
+            // and by Sylvester's law a, has the inertia of diag(B), with nullity zero.
+            Inertia out;
+            std::vector<Z> row(n),off(n);
+            for(std::size_t i=0;i<n;++i) {
+                poll(cancelled);
+                for(std::size_t j=i;j<n;++j)row[j]=0;
+                for(std::size_t m=0;m<=i;++m) {
+                    const auto xmi=x(m,i).get_mpz_t();
+                    if(mpz_sgn(xmi)==0)continue;
+                    for(std::size_t j=i;j<n;++j) {
+                        const auto cmj=c(m,j).get_mpz_t();
+                        if(mpz_sgn(cmj)!=0)mpz_addmul(row[j].get_mpz_t(),xmi,cmj);
+                    }
+                }
+                for(std::size_t j=i+1;j<n;++j) {
+                    const auto v=row[j].get_mpz_t();
+                    for(Z* sum: {&off[i],&off[j]}) {
+                        if(mpz_sgn(v)<0)mpz_sub(sum->get_mpz_t(),sum->get_mpz_t(),v);
+                        else mpz_add(sum->get_mpz_t(),sum->get_mpz_t(),v);
+                    }
+                }
+                if(mpz_cmpabs(row[i].get_mpz_t(),off[i].get_mpz_t())<=0)return std::nullopt;
+                if(mpz_sgn(row[i].get_mpz_t())>0)++out.positive;
+                else ++out.negative;
+            }
+            return out;
+        }
+    }
+    std::optional<Inertia> certify_congruence(const ZMatrix& a,const ZMatrix& x) {
+        return dominant_congruence(a,x,{});
+    }
+    namespace {
+        std::optional<Inertia> proposed_congruence(const ZMatrix& a,unsigned precision_bits,const CancelCheck& cancelled) {
+            if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+            if(precision_bits<16||precision_bits>max_congruence_precision)
+                throw std::invalid_argument("congruence precision must be 16.."+std::to_string(max_congruence_precision)+" bits");
+            const auto n=a.n;
+            // Untrusted proposal: an LDL^T of a without pivoting, in floating point whose precision
+            // is set on every object; the process-global default precision is never read or changed.
+            // The upper triangle holds the active matrix, the strict lower triangle L's multipliers.
+            const mpf_class zero(0,precision_bits),one(1,precision_bits);
+            std::vector<mpf_class> f(n*n,zero);
+            mpf_class product=zero,sum=zero;
+            auto at=[n](std::vector<mpf_class>& v,std::size_t i,std::size_t j) {
+                return v[i*n+j].get_mpf_t();
+            };
+            std::size_t entry_bits=0;
+            for(std::size_t i=0;i<n;++i)for(std::size_t j=i;j<n;++j) {
+                mpf_set_z(at(f,i,j),a(i,j).get_mpz_t());
+                entry_bits=std::max(entry_bits,bits(a(i,j)));
+            }
+            for(std::size_t k=0;k<n;++k) {
+                poll(cancelled);
+                const auto pivot=at(f,k,k);
+                if(mpf_sgn(pivot)==0)return std::nullopt;
+                for(std::size_t i=k+1;i<n;++i) {
+                    if(mpf_sgn(at(f,k,i))==0)continue;
+                    const auto l=at(f,i,k);
+                    mpf_div(l,at(f,k,i),pivot);
+                    for(std::size_t j=i;j<n;++j)if(mpf_sgn(at(f,k,j))!=0) {
+                        mpf_mul(product.get_mpf_t(),l,at(f,k,j));
+                        mpf_sub(at(f,i,j),at(f,i,j),product.get_mpf_t());
+                    }
+                }
+            }
+            // W = L^-1, unit lower triangular, one column at a time. Only L and the pivots are needed
+            // from now on, so W(i,j), i>j, is stored at f(j,i) in the upper triangle; that is W^T, the
+            // layout of x. The unit diagonal of W is implicit.
+            for(std::size_t j=0;j<n;++j) {
+                poll(cancelled);
+                for(std::size_t i=j+1;i<n;++i) {
+                    mpf_set_ui(sum.get_mpf_t(),0);
+                    for(std::size_t m=j;m<i;++m) {
+                        const auto wmj=m==j?one.get_mpf_t():at(f,j,m);
+                        if(mpf_sgn(at(f,i,m))!=0&&mpf_sgn(wmj)!=0) {
+                            mpf_mul(product.get_mpf_t(),at(f,i,m),wmj);
+                            mpf_sub(sum.get_mpf_t(),sum.get_mpf_t(),product.get_mpf_t());
+                        }
+                    }
+                    mpf_set(at(f,j,i),sum.get_mpf_t());
+                }
+            }
+            // x = 2^s*W^T, truncated to integers: 2^s on the diagonal and zero below it by
+            // construction. Any integers would do for soundness; only the dominance test decides.
+            // Entries far beyond the input's scale mean a failed factorization, and are refused
+            // before they are converted, which bounds the exact work.
+            const mp_bitcnt_t scale=precision_bits-8;
+            const long limit=static_cast<long>(precision_bits+entry_bits);
+            ZMatrix x(n);
+            for(std::size_t r=0;r<n;++r) {
+                mpz_setbit(x(r,r).get_mpz_t(),scale);
+                for(std::size_t c=r+1;c<n;++c) {
+                    const auto v=at(f,r,c);
+                    if(mpf_sgn(v)==0)continue;
+                    long exponent=0;
+                    mpf_get_d_2exp(&exponent,v);
+                    if(exponent>limit)return std::nullopt;
+                    mpf_mul_2exp(product.get_mpf_t(),v,scale);
+                    mpz_set_f(x(r,c).get_mpz_t(),product.get_mpf_t());
+                }
+            }
+            return dominant_congruence(a,x,cancelled);
+        }
+    }
+    std::optional<Inertia> congruence_inertia(const ZMatrix& a,unsigned precision_bits) {
+        return proposed_congruence(a,precision_bits,{});
+    }
+    InertiaReport scheduled_inertia(const ZMatrix& a,const std::vector<unsigned>& precisions,const CancelCheck& cancelled) {
+        if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+        InertiaReport report;
+        if(diagonal(a)) {
+            report.method="diagonal";
+            report.inertia=inertia(a);
+            return report;
+        }
+        for(unsigned precision:precisions)if(const auto in=proposed_congruence(a,precision,cancelled)) {
+            report.method="congruence";
+            report.precision_bits=precision;
+            report.inertia=*in;
+            return report;
+        }
+        report.method="elimination";
+        report.inertia=eliminate(a,cancelled);
+        return report;
+    }
+    DefinitenessReport check_positive_definite(const ZMatrix& a) {
+        const auto decided=scheduled_inertia(a,{64u,128u,256u});
+        DefinitenessReport report;
+        report.positive_definite=decided.inertia.positive==a.n;
+        report.method=decided.method;
+        report.precision_bits=decided.precision_bits;
+        return report;
     }
     IntegerPencil integer_pencil(const QMatrix& k,const QMatrix& m) {
         if(k.n!=m.n)throw std::invalid_argument("K and M dimensions differ");
@@ -873,11 +1057,22 @@ namespace secular {
         }
         return p;
     }
-    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& s) {
-        if(f.n!=e.n)throw std::invalid_argument("pencil dimensions differ");
+    std::vector<unsigned> shifted_precisions(const Q& s) {
+        std::vector<unsigned> out;
+        // A canonical denominator is positive, so bits() is at least one.
+        const std::size_t first=(64+bits(s.get_den())+63)/64*64;
+        for(std::size_t precision=first;precision<=max_congruence_precision&&out.size()<3;precision*=2)
+            out.push_back(static_cast<unsigned>(precision));
+        return out;
+    }
+    InertiaReport shifted_inertia_report(const ZMatrix& f,const ZMatrix& e,const Q& s,const CancelCheck& cancelled) {
+        if(f.n!=e.n||f.data.size()!=e.data.size())throw std::invalid_argument("pencil dimensions differ");
         ZMatrix a(f.n);
         for(std::size_t i=0;i<f.data.size();++i)a.data[i]=s.get_den()*f.data[i]-s.get_num()*e.data[i];
-        return inertia(a);
+        return scheduled_inertia(a,shifted_precisions(s),cancelled);
+    }
+    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& s,const CancelCheck& cancelled) {
+        return shifted_inertia_report(f,e,s,cancelled).inertia;
     }
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned requested) {
         if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
@@ -977,6 +1172,108 @@ namespace secular {
         for(auto& c:r.coefficients)r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(c));
         return r;
     }
+    namespace {
+        // Exponents a_i >= 0 with a_i+a_j <= v_q(A_ij) for every nonzero entry of E and F. The
+        // start a_i = floor(min_j v_q / 2) over row and column i is feasible; each coordinate is
+        // then raised to its largest feasible value, in a fixed order. Every feasible choice
+        // gives an exact reduction; the ascent only aims at a large sum.
+        std::vector<unsigned long> congruence_exponents(const ZMatrix& e,const ZMatrix& f,unsigned long q) {
+            const auto n=e.n;
+            constexpr auto unbounded=std::numeric_limits<unsigned long>::max();
+            std::vector<std::vector<std::pair<std::size_t,unsigned long>>> limits(n);
+            std::vector<unsigned long> cap(n,unbounded);
+            const Z prime=q;
+            Z rest;
+            for(const ZMatrix* a: {
+                &e,&f
+            })for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+                const Z& entry=(*a)(i,j);
+                if(entry==0)continue;
+                const unsigned long v=q==2?mpz_scan1(entry.get_mpz_t(),0):
+                    mpz_remove(rest.get_mpz_t(),entry.get_mpz_t(),prime.get_mpz_t());
+                limits[i].emplace_back(j,v);
+                if(i!=j)limits[j].emplace_back(i,v);
+                cap[i]=std::min(cap[i],v);
+                cap[j]=std::min(cap[j],v);
+            }
+            std::vector<unsigned long> exponent(n);
+            for(std::size_t i=0;i<n;++i)exponent[i]=cap[i]==unbounded?0:cap[i]/2;
+            for(bool changed=true;changed;) {
+                changed=false;
+                for(std::size_t i=0;i<n;++i) {
+                    unsigned long best=unbounded;
+                    // Feasibility gives v >= exponent[i]+exponent[j], so v-exponent[j] cannot wrap.
+                    for(const auto& [j,v]:limits[i])best=std::min(best,j==i?v/2:v-exponent[j]);
+                    if(best!=unbounded&&best>exponent[i]) {
+                        exponent[i]=best;
+                        changed=true;
+                    }
+                }
+            }
+            return exponent;
+        }
+        Z content(const ZMatrix& a) {
+            Z g=0;
+            for(const auto& v:a.data)mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),v.get_mpz_t());
+            return g==0?Z(1):g;
+        }
+    }
+    PencilReduction reduce_pencil(const ZMatrix& e,const ZMatrix& f) {
+        if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
+        const auto n=e.n;
+        if(n==0||e.data.size()!=n*n||f.data.size()!=n*n)throw std::invalid_argument("invalid pencil storage");
+        PencilReduction r {
+            e,f,std::vector<Z>(n,1),1,1,true
+        };
+        for(unsigned long q: {
+            2UL,5UL
+        }) {
+            const auto exponent=congruence_exponents(e,f,q);
+            for(std::size_t i=0;i<n;++i)if(exponent[i]) {
+                Z power;
+                mpz_ui_pow_ui(power.get_mpz_t(),q,exponent[i]);
+                r.scale[i]*=power;
+                r.trivial=false;
+            }
+        }
+        // E' = P^-1 E P^-1 and F' = P^-1 F P^-1 by checked exact divisions, then their contents.
+        if(!r.trivial)for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+            const Z d=r.scale[i]*r.scale[j];
+            if(d==1)continue;
+            r.E(i,j)=exact_divide(e(i,j),d);
+            r.F(i,j)=exact_divide(f(i,j),d);
+        }
+        r.e_content=content(r.E);
+        r.f_content=content(r.F);
+        for(auto [a,g]: {
+            std::pair<ZMatrix*,const Z*>{&r.E,&r.e_content},std::pair<ZMatrix*,const Z*>{&r.F,&r.f_content}
+        })if(*g!=1) {
+            for(auto& v:a->data)v=exact_divide(v,*g);
+            r.trivial=false;
+        }
+        return r;
+    }
+    CoefficientResult reduced_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers) {
+        const auto reduction=reduce_pencil(e,f);
+        if(reduction.trivial)return characteristic(e,f,workers);
+        auto r=characteristic(reduction.E,reduction.F,workers);
+        // c_k = c'_k alpha^(n-k) beta^k prod(scale)^2, by exact integer multiplication only.
+        const auto n=e.n;
+        Z square=1;
+        for(const auto& s:reduction.scale)square*=s;
+        square*=square;
+        std::vector<Z> alpha(n+1,Z(1)),beta(n+1,Z(1));
+        for(std::size_t k=1;k<=n;++k) {
+            alpha[k]=alpha[k-1]*reduction.e_content;
+            beta[k]=beta[k-1]*reduction.f_content;
+        }
+        r.max_coefficient_bits=0;
+        for(std::size_t k=0;k<=n;++k) {
+            r.coefficients[k]*=alpha[n-k]*beta[k]*square;
+            r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(r.coefficients[k]));
+        }
+        return r;
+    }
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1) {
         if(e.n!=f0.n||e.n!=f1.n)throw std::invalid_argument("affine dimensions differ");
         if(e.n>24)throw std::invalid_argument("symbolic affine mode limited to order 24");
@@ -1039,12 +1336,83 @@ namespace secular {
         if(denominator<0&&(c.size()-1)%2)sign=-sign;
         return sign;
     }
+    ScaledPolynomial::ScaledPolynomial(const std::vector<Z>& c,const Z& denominator):q(denominator) {
+        if(c.empty())throw std::invalid_argument("empty polynomial");
+        if(q<=0)throw std::invalid_argument("scaled polynomial denominator must be positive");
+        table.resize(c.size());
+        Z power=1;
+        for(std::size_t i=0;i<c.size();++i) {
+            mpz_mul(table[i].get_mpz_t(),c[i].get_mpz_t(),power.get_mpz_t());
+            if(i+1<c.size())power*=q;
+        }
+    }
+    bool ScaledPolynomial::covers(const Q& x)const {
+        return mpz_sgn(x.get_den_mpz_t())>0&&mpz_divisible_p(q.get_mpz_t(),x.get_den_mpz_t());
+    }
+    int ScaledPolynomial::sign(const Q& x)const {
+        if(!covers(x))throw std::invalid_argument("denominator does not divide the scaled polynomial denominator");
+        // p=x*q is an integer, and v ends as sum_i c_i q^i p^(n-i) = q^n P(x) with q>0.
+        Z p,value=table.front();
+        mpz_divexact(p.get_mpz_t(),q.get_mpz_t(),x.get_den_mpz_t());
+        p*=x.get_num();
+        for(std::size_t i=1;i<table.size();++i) {
+            mpz_mul(value.get_mpz_t(),value.get_mpz_t(),p.get_mpz_t());
+            mpz_add(value.get_mpz_t(),value.get_mpz_t(),table[i].get_mpz_t());
+        }
+        return mpz_sgn(value.get_mpz_t());
+    }
     unsigned oracle_worker_count(unsigned requested,std::size_t jobs) {
         if(requested>64)throw std::invalid_argument("oracle workers must be 0..64");
         if(jobs==0)return 0;
         unsigned workers=requested;
         if(workers==0)workers=std::min(8u,std::max(1u,std::thread::hardware_concurrency()));
         return static_cast<unsigned>(std::min<std::size_t>(workers,jobs));
+    }
+    OrderedRun run_ordered(std::size_t jobs,unsigned workers,const std::function<bool(std::size_t,const CancelCheck&)>& job) {
+        std::vector<std::exception_ptr> errors(jobs);
+        std::atomic<std::size_t> next{0},stop{jobs};
+        // Indices are handed out in increasing order. Once one exceeds the lowest stop seen so far,
+        // so does every later one, and every index below the final stop has been handed out and
+        // run; the lowest stop is thus the serial one, whatever the timing.
+        auto drain=[&] {
+            for(;;) {
+                const auto i=next.fetch_add(1);
+                if(i>=jobs||i>stop.load())return;
+                bool passed=false;
+                // The stop only decreases, so once it is below i it stays there: job i is past
+                // the final stop and its outcome, a Cancelled exception included, is discarded.
+                const CancelCheck superseded=[&stop,i] {
+                    return stop.load()<i;
+                };
+                try {
+                    passed=job(i,superseded);
+                }
+                catch(...) {
+                    errors[i]=std::current_exception();
+                }
+                if(!passed)for(auto lowest=stop.load();i<lowest&&!stop.compare_exchange_weak(lowest,i);) {}
+            }
+        };
+        {
+            // jthread destruction joins every helper before the shared state goes away. A helper
+            // that cannot be created only leaves more of the work to the others and the caller.
+            std::vector<std::jthread> helpers;
+            const auto threads=std::min<std::size_t>(workers,jobs);
+            helpers.reserve(threads);
+            for(std::size_t w=1;w<threads;++w) {
+                try {
+                    helpers.emplace_back(drain);
+                }
+                catch(...) {
+                    break;
+                }
+            }
+            drain();
+        }
+        OrderedRun out;
+        out.stop=stop.load();
+        if(out.stop<jobs)out.error=errors[out.stop];
+        return out;
     }
     OracleReport check_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested,CoefficientOracle oracle) {
         // Validate before scheduling; public Matrix fields may have been edited.

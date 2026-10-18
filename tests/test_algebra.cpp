@@ -38,6 +38,10 @@ int main() {
                 check(actual.positive == expected.positive &&
                       actual.negative == expected.negative &&
                       actual.zero == expected.zero, "congruence inertia mismatch");
+                // The diagonal sign count must agree with elimination on the congruent matrix.
+                auto direct = inertia(d);
+                check(direct.positive == actual.positive && direct.negative == actual.negative &&
+                      direct.zero == actual.zero, "diagonal inertia differs from elimination");
                 check(determinant(a) == expected_determinant, "congruence determinant mismatch");
                 if (expected_determinant != 0) {
                     auto inverse_times_determinant = adjugate(a);
@@ -80,6 +84,28 @@ int main() {
                 }
             }
         }
+        // Diagonal sign count: long and zero entries, and rational entries cleared to integers.
+        ZMatrix wide_diagonal(4);
+        wide_diagonal(0, 0) = pow10(900);
+        wide_diagonal(1, 1) = -pow10(700) - 1;
+        wide_diagonal(3, 3) = 1;
+        const auto wide_inertia = inertia(wide_diagonal);
+        check(wide_inertia.positive == 2 && wide_inertia.negative == 1 && wide_inertia.zero == 1,
+              "long diagonal inertia");
+        QMatrix rational_diagonal(3);
+        rational_diagonal(0, 0) = Q(-1, 3);
+        rational_diagonal(1, 1) = Q(5, 7);
+        rational_diagonal(2, 2) = Q(2, 9);
+        const auto rational_diagonal_inertia = inertia(rational_diagonal);
+        check(rational_diagonal_inertia.positive == 2 && rational_diagonal_inertia.negative == 1 &&
+              rational_diagonal_inertia.zero == 0, "rational diagonal inertia");
+        // One off-diagonal pair leaves the sign count: [[1,2],[2,1]] has eigenvalues 3 and -1.
+        ZMatrix coupled(2);
+        coupled(0, 0) = coupled(1, 1) = 1;
+        coupled(0, 1) = coupled(1, 0) = 2;
+        const auto coupled_inertia = inertia(coupled);
+        check(coupled_inertia.positive == 1 && coupled_inertia.negative == 1 && coupled_inertia.zero == 0,
+              "coupled matrix inertia");
         // A valid file must survive roundtrip; independent fields must reject tampering.
         QMatrix k(2); k(0, 0) = 2; k(1, 1) = 3; k(0, 1) = k(1, 0) = 1;
         Options options; options.digits = 40;

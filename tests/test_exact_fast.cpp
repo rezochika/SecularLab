@@ -1,5 +1,6 @@
 #include "secular/exact.hpp"
 #include <iostream>
+#include <random>
 #include <stdexcept>
 
 using namespace secular;
@@ -30,6 +31,47 @@ int main() {
         check(polynomial_sign({huge,-huge},Q(huge+1,huge))==1,"huge nearby rational above root");
         check(polynomial_sign({-huge,huge},Q(huge-1,huge))==1,"huge negative content below root");
         invalid([&] { polynomial_sign({},Q(0)); },"empty sign polynomial accepted");
+
+        // A shared scaled table must reproduce the general sign at every covered point.
+        const std::vector<Z> cubic{8,-36,46,-15}; // (2x-1)(2x-3)(2x-5)
+        const ScaledPolynomial scaled(cubic,pow10(6));
+        check(scaled.denominator()==pow10(6),"scaled table denominator");
+        for(const Q& root:{Q(1,2),Q(3,2),Q(5,2)})check(scaled.covers(root)&&scaled.sign(root)==0,"scaled table root sign");
+        for(long numerator=-3000000;numerator<=3000000;numerator+=12347) {
+            for(const Q x:{Q(numerator,1000000),Q(numerator,8),Q(numerator,625),Q(numerator,1)}) {
+                Q canonical=x;
+                canonical.canonicalize();
+                check(scaled.covers(canonical)&&scaled.sign(canonical)==polynomial_sign(cubic,canonical),
+                      "scaled table sign differs from general sign");
+            }
+        }
+        check(!scaled.covers(Q(1,3))&&!scaled.covers(Q(1,10000000)),"scaled table covers a non-dividing denominator");
+        invalid([&] { (void)scaled.sign(Q(1,3)); },"scaled table evaluated an uncovered point");
+        invalid([&] { ScaledPolynomial({},Z(10)); },"empty scaled polynomial accepted");
+        invalid([&] { ScaledPolynomial(cubic,Z(0)); },"zero scaled denominator accepted");
+        invalid([&] { ScaledPolynomial(cubic,Z(-10)); },"negative scaled denominator accepted");
+        check(ScaledPolynomial({0,0},Z(7)).sign(Q(5,7))==0,"scaled zero polynomial sign");
+        check(ScaledPolynomial({-4,4,3},Z(1)).sign(Q(2))==-1,"scaled negative content sign");
+        {
+            // Long random coefficients and nearby decimal points, as certification uses them.
+            std::mt19937_64 generator(20261018);
+            std::vector<Z> wide(41);
+            for(auto& c:wide) {
+                c=0;
+                for(int limb=0;limb<6;++limb)c=(c<<32)+static_cast<unsigned long>(generator()&0xffffffffu);
+                if(generator()%2)c=-c;
+            }
+            const ScaledPolynomial decimal(wide,pow10(40));
+            for(int sample=0;sample<200;++sample) {
+                const unsigned places=static_cast<unsigned>(generator()%41);
+                Z numerator=static_cast<unsigned long>(generator()&0xffffffffu);
+                numerator=(numerator<<32)+static_cast<unsigned long>(generator()&0xffffffffu);
+                if(generator()%2)numerator=-numerator;
+                Q x(numerator,pow10(places));
+                x.canonicalize();
+                check(decimal.sign(x)==polynomial_sign(wide,x),"scaled table sign differs on long coefficients");
+            }
+        }
 
         auto squarefree=check_squarefree({1,0,-2});
         check(!squarefree.repeated&&squarefree.modular_prime!=0,"squarefree witness missing");

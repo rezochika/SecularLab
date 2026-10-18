@@ -29,7 +29,10 @@ Then E,F are integer matrices and
 The output coefficient file stores the left-hand polynomial, with L recorded. Its leading
 coefficient is det(E), not 1. Eigenvalues are unchanged by this known scalar factor.
 
-The solver proves positive definiteness of both E and F by exact inertia before root recovery.
+The solver proves positive definiteness of both E and F exactly before root recovery.
+For a diagonal matrix, such as the usual lumped mass matrix, that is the sign count of
+its diagonal entries, in O(n) after the O(n^2) test that it is diagonal. Any other matrix is
+first tried with the congruence certificate of section 4 and otherwise decided by exact inertia.
 The general coefficient command only requires nonsingular E.
 
 ## 2. Exact characteristic coefficients
@@ -60,6 +63,30 @@ the full matrices. In each stage the rows are independent jobs for the `--worker
 entry is the same exact integer for any schedule, and a failure reports the lowest failing row.
 Every division that is performed is still checked, and S_n=0 is tested on every stored entry.
 For symmetric pencils, symmetry makes the skipped lower-triangle divisions and tests redundant.
+
+### Exact 2-adic and 5-adic reduction
+
+Clearing decimal denominators multiplies every entry by the same L, and decimal inputs carry
+further powers of 2 and 5. Before the recurrence, the solver and the `coefficients` command
+remove that structure by an exact congruence. For each prime q in {2,5}, exponents a_i >= 0
+are chosen with a_i + a_j <= v_q(E_ij) and a_i + a_j <= v_q(F_ij) for every nonzero entry; a
+diagonal entry needs 2a_i <= v_q. The start a_i = floor(min_j v_q/2) over row and column i is
+feasible. Each a_i is then raised, in a fixed order, to the largest value the others allow.
+With P = diag(p_i), p_i = 2^(a_i) 5^(b_i), the pencil E' = P^-1 E P^-1, F' = P^-1 F P^-1 is formed
+by checked exact divisions. Then alpha = content(E') and beta = content(F') are divided out,
+again exactly, giving E'' and F''. The exact identities
+
+    det(zE-F) = (prod_i p_i)^2 det(zE'-F'),
+    det(z alpha E'' - beta F'') = sum_k c''_k alpha^(n-k) beta^k z^(n-k)
+
+give c_k = c''_k alpha^(n-k) beta^k (prod_i p_i)^2, where c'' are the coefficients of
+det(zE''-F''). That map uses only integer multiplication. The unchanged recurrence, with all its
+divisibility and S_n=0 checks, runs on (E'',F''). P keeps zero entries, symmetry and a diagonal
+E, so the same symmetric and diagonal paths apply. Any feasible exponents give the same
+coefficients; P=I and alpha=beta=1 is the trivial case. The coefficient oracle below still checks
+the mapped coefficients against the original (E,F), so the proof does not depend on the
+reduction. On BCSSTK05 the largest workspace entry falls from 13150 to 9111 bits, and most
+reduced stiffness entries fit one 64-bit limb.
 
 By default the result is then checked independently of the recurrence by a multimodular
 characteristic polynomial (`--oracle auto`). For a prime p not dividing det E, det(zE-F) =
@@ -118,18 +145,38 @@ with indices outside 0,...,n omitted. It represents g(z^2)=(-1)^n f(z)f(-z).
 The roots of g are the squares of the roots of f. After r steps, successive coefficient
 ratios yield approximate roots
 
-    exp((log|a_k^(r)| - log|a_(k-1)^(r)|)/2^r).
+    |a_k^(r) / a_(k-1)^(r)|^(1/2^r).
 
 The positive, distinct spectrum assumption makes this a candidate-generation strategy for
 all roots in decreasing order. The program never uses a numerical reference eigensolver,
 a bisection eigensolver or Newton polishing to replace this stage.
 
-To prevent the enormous exponent growth of literal repeated squaring, each coefficient
-is represented by its sign and logarithmic magnitude. Signed additions implement the same
-paired recurrence, with leading-log normalization. Very small relative terms may be
-ignored in this *untrusted* arithmetic. Loss of the positive-root coefficient sign pattern
-triggers a higher-precision restart. The logarithms/exponentials use Boost's GMP float
-backend; they are not interval enclosures or a correctly-rounded special-function promise.
+Literal repeated squaring makes the coefficients' exponents grow like 2^r. Each coefficient
+is therefore stored in extended-exponent form m*2^e. The mantissa m is a signed GMP float at
+the working precision with 1/2 <= |m| < 1, and e is an exact integer. The pass starts from the
+exact coefficients (`mpf_set_z`, then normalization) and divides out a_0's power of two. For
+each b_k, every term of the paired sum (the diagonal a_k^2 and each 2 a_j a_(2k-j)) gets an
+exact exponent. The terms are aligned to the largest of these exponents, so a term costs one
+mantissa product, a binary shift and an addition. The sum is then normalized. No logarithm or
+exponential is evaluated.
+
+Terms more than cut bits below the largest term of their sum are ignored in this *untrusted*
+arithmetic. Here cut is the bit length of 10^(work+10), the same 10^-(work+10) relative cutoff
+the earlier signed-logarithm form used. Loss of the positive-root coefficient sign pattern,
+including exact cancellation to zero, triggers a higher-precision restart.
+
+Exponents start as checked 64-bit integers. They can outgrow that range after about 50
+squarings, for example near 54 for roots around 1e-100. The first overflow converts the
+iterate exactly to unbounded GMP integers for the rest of the pass. The integer exponents are
+the same either way, so the candidates do not depend on where the switch happens, and no step
+falls back to logarithmic magnitudes. `graeffe_unbounded_exponents` in `result.json` reports
+the switch for the final pass.
+
+A candidate is recovered without transcendental functions. For q = |m_k/m_(k-1)| and
+d = e_k - e_(k-1), normalized so that 1/2 <= q < 1, each of r rounds makes d even (doubling q
+if needed), takes the square root of q and halves d. The result is q*2^d. Each square root
+halves the relative error carried by q. All of this uses GMP floats through Boost's GMP
+backend; it is not an interval enclosure or a correctly-rounded promise.
 
 Candidates are considered for exact certification after every second squaring once successive
 values are numerically stable to the heuristic absolute threshold 10^-(digits+16), and also
@@ -149,21 +196,33 @@ For rational s=p/q with q>0, the integer symmetric matrix
 has the same inertia as K-sM. Because M is positive definite, its positive eigenvalue count
 is exactly the number of generalized eigenvalues greater than s.
 
-The fast inertia routine uses fraction-free symmetric elimination. Symmetric row/column
-permutations are congruences and do not alter inertia. At each step the sign of the LDL
-pivot equals sign(current Bareiss pivot / previous Bareiss pivot).
+Every inertia, of an endpoint matrix as of F and E in the positive-definiteness checks, is
+decided by one of three exact tests, tried in this order. A diagonal matrix needs no
+elimination: its eigenvalues are its diagonal entries, so their signs are counted directly.
+Otherwise the congruence certificate at the end of this section is tried, in which floating
+point only proposes and an exact integer test decides. When it fails, fraction-free symmetric
+elimination decides. Symmetric row/column permutations are congruences and do not alter
+inertia. At each step the sign of the LDL pivot equals sign(current Bareiss pivot / previous
+Bareiss pivot).
 
-When all active diagonal entries are zero but an off-diagonal remains, the program falls
+When all active diagonal entries are zero but an off-diagonal remains, the elimination falls
 back to exact rational block elimination. A block [[0,b],[b,0]], b!=0, contributes one
 positive and one negative eigenvalue; its Schur complement is formed exactly. An entirely
 zero remainder contributes its dimension to the nullity. No tiny-pivot tolerance, guessed
-sign or floating-point Cholesky decision enters this certificate.
+sign or floating-point Cholesky decision enters any of the three tests.
 
 For candidate k (0 is largest), construct exact rational endpoints ell,u around its rounded
 center. Proposal widths depend on the requested decimal places, candidate magnitude, nearest
 candidate gap and working precision. This lets very small or closely spaced roots have
-distinct intervals even when their printed decimals are identical. Each candidate gets at
-most three increasingly narrow proposals, capped by a heuristic working-precision allowance
+distinct intervals even when their printed decimals are identical. The magnitude and the gap
+enter only through their nearest powers of ten: the e with 10^(e-1/2) <= x < 10^(e+1/2),
+decided by the exact test 10^(2e-1) <= x^2 < 10^(2e+1). That depends on the value alone, not on
+the dyadic form of a converted floating candidate. Its boundaries are irrational, so candidate
+noise can move it only next to some sqrt(10)*10^k. The certificates are therefore normally
+identical for every working precision and candidate arithmetic that certifies. An earlier
+estimate counted the decimal digits of the candidate's numerator and denominator, and varied by
+one with the candidate's lowest set bit. Each candidate gets at most three increasingly narrow
+proposals, capped by a heuristic working-precision allowance
 that retains the original output-driven widths (so exact candidates can certify beyond their
 working precision), and by the decimal-scale resource limit. These heuristics only propose intervals; none relaxes
 the exact acceptance conditions. A nonsingular endpoint pair must satisfy
@@ -187,11 +246,146 @@ Rational endpoint and integer-size costs are real; they are not treated as const
 The stored radius is max(|printed-ell|,|printed-u|), an exact rational bound about the *printed*
 value. A root at 1/4 rounded to 0.3 needs a radius at least 0.05 regardless of internal precision.
 
+### Polynomial proof
+
+`--certification auto` (the default) first tries a proof that needs no shifted inertia. It is
+available only after the oracle has verified q(z) = det(zE-F) for the original pencil. The same
+proposals are used, but an endpoint is tested by the exact sign of q. A width is accepted when
+q(ell) and q(u) are nonzero with opposite signs, so (ell,u) contains an odd number of roots.
+An endpoint with q=0 is itself a root and becomes an exact singleton. The decimal-rounding gate
+is the same as above. Once all n rows are formed, a final gate checks the shared row metadata and
+every sign again. n disjoint intervals, each holding a root, exhaust the n roots of the degree-n
+polynomial q. So each interval holds exactly one simple root, and the sorted rows carry the
+correct indices. This argument proves only a complete spectrum, never a partial one.
+
+For x=p/s in lowest terms with s>0, `polynomial_sign` returns the sign of the homogeneous
+integer value sum_i q_i p^(n-i) s^i = s^n q(x). Every proposal endpoint of one width w has a
+denominator dividing 10^(w+8), and the rounding midpoints have one dividing 10^(d+1). Signs at
+such decimal points share a table T_i = q_i*Q^i for a power of ten Q. The table is built once,
+and each sign is then the sign of sum_i T_i (xQ)^(n-i) = Q^n q(x), where xQ is an integer. Q is
+always the exact key: a point uses a table only after the exact test that den(x) divides Q, and
+any other point uses the general evaluation. Both give the identical sign; only the work changes.
+A table is not built when it would exceed 2^28 bits, or when Q is much longer than den(x), as
+for den(x)=2^a; such points use the general evaluation too.
+
+Within one certification attempt, the signs of the fixed coefficient vector are kept in a memo
+keyed by the exact canonical rational. The final gate therefore re-reads the signs that
+certify_one computed instead of evaluating them again. A missing key is still evaluated, so the gate still catches a
+row whose endpoints were never tested. `verify` starts with an empty memo.
+`polynomial_sign_evaluations` counts the evaluations actually performed, not memo hits.
+
+When the polynomial attempt fails, exact inertia is tried on the same candidates only if it
+could succeed. With q = det(zE-F) verified, q(x)=0 exactly when x is an eigenvalue, that is,
+when qF-pE is singular. Both modes build the same proposals and differ only in the endpoint test.
+
+- The polynomial test skips a width only when q(ell) and q(u) are nonzero with equal signs.
+  Then neither endpoint is an eigenvalue, so the inertia singleton tests cannot pass. The
+  interval holds an even number of roots counting multiplicity, so the inertia counts k+1 and
+  k, which mean exactly one simple root, are impossible too.
+- An endpoint with q=0 is a polynomial singleton, which always passes the rounding gate.
+- When the polynomial test accepts a bracket, inertia either rejects it or accepts the same
+  interval. It then runs the same rounding and midpoint-sign tests, plus an inertia test.
+- The width sequence, its resource limit and the candidate ordering checks do not depend on the
+  mode.
+
+So if the polynomial attempt fails for some candidate, or in the ordering checks, the inertia
+attempt fails too, and it is skipped. Only a failure of the final gates, after every candidate
+had a row, is retried with exact inertia, because inertia may choose different widths. The same
+holds for `verify`: under the verified identity, a row whose exact signs fail also fails its
+inertia counts, so only a failure of the shared row checks reaches the inertia replay. Neither
+change alters what is accepted; only `inertia_evaluations` and the timings change.
+
+### Congruence certificate
+
+Elimination is exact but costly, because Bareiss entries grow into leading minors about k times
+as long as an entry. On BCSSTK05 one elimination took 0.84 s for F, and 7-8 s for an endpoint
+matrix qF-pE, whose entries are longer by the bits of q. For a symmetric A that is not diagonal,
+every inertia therefore first tries a certificate whose integers stay short.
+
+- Proposal, untrusted. A GMP floating-point LDL^T of A without pivoting, at a precision P set on
+  each object, gives W, approximately L^-1. The process-global default precision is neither read
+  nor changed. X = trunc(2^(P-8)*W^T) is an integer matrix, upper triangular with 2^(P-8) on its
+  diagonal by construction. A zero floating pivot abandons the proposal, and so does an entry of
+  W above 2^(P+b), where b is the bit length of the longest entry of A; that bounds the exact work.
+  One n-by-n floating array suffices: W^T overwrites the factored upper triangle, which is no
+  longer needed once L and the pivots are known.
+- Check, exact. X must be upper triangular with a nonzero diagonal, so det X != 0. B = X^T A X
+  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|. B is formed one
+  row of its upper triangle at a time and not kept. That row completes the off-diagonal sum of
+  row i, since the entries b(k,i), k<i, came with earlier rows, so a failing row ends the check.
+
+When the check passes, B is symmetric and strictly diagonally dominant. B and every
+diag(B)+t(B-diag(B)), 0<=t<=1, are then nonsingular (Levy-Desplanques), so no eigenvalue crosses
+zero along that path, and B has the inertia of diag(B). By Sylvester's law of inertia so does A,
+with nullity zero. A is positive definite exactly when every b_ii is positive. A negative b_ii
+refutes positive definiteness just as exactly.
+
+The floating-point stage decides nothing: a poor proposal can only fail the exact check. A tie in
+the dominance test is a failure. A singular A always fails, because a singular B cannot be
+strictly diagonally dominant. Each A gets a short, deterministic schedule of precisions, tried in
+order; when none passes, the fraction-free inertia above decides, unchanged. No precision above
+16384 bits is tried. The work is O(n^3) floating-point operations at a few limbs, plus about
+n^3/6 integer products of entries near 2P+b bits.
+
+- Positive definiteness: P = 64, 128 and 256. On BCSSTK05 the 64-bit proposal certifies F in
+  0.02 s. The oil-rig K certifies at 64 bits too. Badly conditioned matrices need more: integer
+  Hilbert matrices of order 16 need 128 bits, order 30 needs 256, and from about order 60 they
+  fall back to elimination.
+- Endpoints: a proposal endpoint s=p/q of width w lies within about 10^-w of an eigenvalue, and
+  q divides 10^(w+8). Near an eigenvalue qF-pE is nearly singular, with a condition number that
+  grows like 1/|s-lambda|, so the precision grows with q: P = 64+bits(q), rounded up to whole
+  64-bit limbs, then 2P and 4P. At 50 places that is 320, 640 and 1280 bits. All 132 oil-rig
+  endpoints and all 306 BCSSTK05 endpoints certify at 320 bits; an earlier measurement found
+  only 74 of the 132 oil-rig endpoints at 192 bits, and all at 256. An oil-rig endpoint takes
+  about 8 ms instead of 0.62 s, a BCSSTK05 endpoint about 0.03 s instead of 6.8 s. An exact
+  singleton endpoint is an eigenvalue, so qF-pE is singular: its proposals always fail, and
+  elimination proves the nullity. A denominator longer than about 16300 bits leaves no precision
+  in the schedule, and elimination decides directly.
+
+Certificates and `inertia_evaluations` are unchanged: the counter counts inertias, whichever test
+decided them.
+
+### Parallel inertia certification
+
+Exact inertia certifies one root per job, on as many threads as the coefficient phases use
+(`--workers`, clamped to n). In `solve` a job is certify_one for one candidate; in `verify` it is
+the inertia test of one row. The rows, the counters and any error are those of the serial loop
+for every worker count:
+
+- The candidate ordering checks run first, serially. Only the roots below the first candidate
+  that fails them are submitted: the roots the serial loop could reach.
+- Roots are handed out in increasing order. The run stops at the lowest root that fails or
+  throws, as the serial loop would, and every root below it has run and passed. Roots above it
+  may have run too, but their rows, counts and exceptions are discarded, and no worker starts a
+  root above a known failure.
+- A job counts its own inertias and records the polynomial signs it requests; inertia mode
+  needs them only at rounding midpoints. It may read the attempt's sign memo, but never changes
+  it. After the run the roots up to the stop, in index order, add their inertia counts and
+  replay their sign requests into the memo: a point missing from it counts one evaluation and is
+  stored. So `inertia_evaluations` and `polynomial_sign_evaluations` equal the serial counts,
+  and so does the memo that a later step of the same attempt reads.
+- An exception is rethrown after this counting, and only when it came from the stopping root. An
+  exception from a root above a failure is dropped, since the serial loop never reaches that root.
+- A root that is already running when a lower one stops abandons its exact work. Elimination
+  polls once per pivot, the proposal once per factorization step and the dominance check once per
+  row, whether the run has stopped below that root; if so they throw, and the exception is
+  discarded with the rest of the root. The poll never fires for a root at or below the stop, so a
+  hand-edited certificate with a cheap wrong first row and huge later rows fails as fast as in
+  serial replay.
+
+Each running root holds its own proposal and, when elimination decides, its own Bareiss matrix,
+so peak memory grows with the worker count; `--workers 1` bounds it to one root. The polynomial
+proof stays serial: its signs share one evaluator's scaled tables and memo, and its whole
+certification takes about 0.05 s on BCSSTK05. With eight workers `--certification inertia` now
+solves the oil rig in about 0.27 s instead of 78 s, and BCSSTK05 in about 2 s instead of 2024 s
+(1.7 s and 14 s with one worker).
+
 ## 5. Replay and failure reporting
 
 `verify` rereads the matrices and TSV and re-establishes positive definiteness, endpoint
 inertias, root indices, disjointness, exact rounding and every radius bound. It does not trust
-an earlier status string. The replay shares the native inertia implementation with the solver;
+an earlier status string. The replay shares the native inertia implementation and the
+congruence certificate with the solver;
 calling it an independent-authorship proof checker would overstate its independence.
 
 - `CERTIFIED`, exit 0: all n eigenvalues accepted with stated decimal rounding and radii.
@@ -215,8 +409,13 @@ over the workers. The modular oracle needs O(n^3) word operations per prime, plu
 every entry and coefficient to form residues. The number of primes is about the bound's bit
 length divided by 61. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
-Each Graeffe pass costs O(n^2) high-precision signed-log operations. Exact inertia is O(n^3)
-arithmetic per endpoint, normally two endpoints for each root, and may dominate total time.
+Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
+shift and addition per term that is not negligible. Recovering the candidates after r
+squarings costs r square roots per root. Exact inertia is O(n^3) arithmetic per endpoint,
+normally two endpoints for each root, on short floating-point and integer entries when the
+congruence certificate passes and on growing Bareiss entries when elimination decides. The roots
+of the inertia proof run in parallel. A polynomial sign costs one
+Horner pass of integer products, which a shared scaled table keeps short.
 
 The result timings separate coefficients, coefficient oracle, Graeffe and certification. Total
 also includes validation, denominator clearing and squarefree checking, so the named phase
@@ -231,9 +430,12 @@ The `recurrence_workspace_bits_max` field measures the largest entry of T_k-c_k 
 the sampled recurrence stages, not the peak bit length of every GMP temporary. When only the
 upper triangle of T_k is formed (symmetric pencil, diagonal E), each entry below the diagonal is
 measured as E_jj*S_k(i,j), which equals it exactly. It is formed only when it could raise the
-maximum, so the field keeps its full-matrix meaning.
+maximum, so the field keeps its full-matrix meaning. It measures the recurrence actually run, on
+the reduced pencil (E'',F''); it equals the unreduced value only when the reduction is trivial.
+`coefficient_bits_max` is measured after the coefficients are mapped back.
 `exact_divisions` counts the divisions the coefficient recurrence actually performs: one trace
 division per stage, plus n(n+1)/2 entry divisions per stage for symmetric pencils, or n^2
-otherwise. It excludes those inside Bareiss elimination, the oracles or the inertia routine.
+otherwise. It excludes those inside Bareiss elimination, the reduction, the oracles or the
+inertia routine.
 `coefficient_oracle` names the oracle that decided the identity, `oracle_moduli` the primes of a
 modular decision, and `oracle_workers` and `recurrence_workers` the threads actually used.

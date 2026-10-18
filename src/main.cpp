@@ -39,8 +39,9 @@ Inertia mode checks the original pencil directly. Decimal rounding is exact
 half-away-from-zero. Auto verify derives its polynomial from the input matrices.
 Oracle auto proves the coefficient identity modulo proven primes, using n+1 Bareiss
 determinants when inconclusive or estimated cheaper; bareiss always uses them.
-Workers run fixed-pencil recurrence rows and oracle jobs: 0 means automatic (at most 8);
-explicit 1..64 is clamped to the jobs of each phase. Results never depend on it.
+Workers run fixed-pencil recurrence rows, oracle jobs and the roots of an exact-inertia
+proof: 0 means automatic (at most 8); explicit 1..64 is clamped to the jobs of each phase.
+Results never depend on it.
 --no-coefficient-check forces solve to use inertia and is forbidden for verify.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum
@@ -208,7 +209,8 @@ int main(int argc,char** argv) {
                 return 0;
             }
             auto p=integer_pencil(k,m);
-            auto co=characteristic(p.E,p.F,o.oracle_workers);
+            // The recurrence runs on the reduced pencil; the oracle checks the original one.
+            auto co=reduced_characteristic(p.E,p.F,o.oracle_workers);
             OracleReport oracle;
             if(check)oracle=check_coefficients(p.E,p.F,co.coefficients,o.oracle_workers,o.coefficient_oracle);
             if(check&&!oracle.verified)throw std::logic_error("coefficient identity failed");

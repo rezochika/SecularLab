@@ -100,6 +100,55 @@ namespace {
                   "recurrence workers not clamped to stage rows");
         }
     }
+    // L*D*A*D with D=diag(2^x_i 5^y_i): the decimal structure that denominator clearing creates.
+    Pencil decimal_pencil(const Pencil& p,unsigned long e_factor,unsigned long f_factor) {
+        const auto n=p.e.n;
+        std::vector<Z> d(n);
+        for(auto& v:d) {
+            Z two,five;
+            mpz_ui_pow_ui(two.get_mpz_t(),2,static_cast<unsigned long>(generator()%9));
+            mpz_ui_pow_ui(five.get_mpz_t(),5,static_cast<unsigned long>(generator()%7));
+            v=two*five;
+        }
+        Pencil out=p;
+        for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+            out.e(i,j)*=d[i]*d[j]*e_factor;
+            out.f(i,j)*=d[i]*d[j]*f_factor;
+        }
+        return out;
+    }
+    bool decimal_power(Z v) {
+        mpz_remove(v.get_mpz_t(),v.get_mpz_t(),Z(2).get_mpz_t());
+        mpz_remove(v.get_mpz_t(),v.get_mpz_t(),Z(5).get_mpz_t());
+        return v==1;
+    }
+    PencilReduction reduction_matches_recurrence(const Pencil& p) {
+        const auto n=p.e.n;
+        const auto r=reduce_pencil(p.e,p.f);
+        check(r.scale.size()==n&&r.e_content>0&&r.f_content>0,"reduction shape");
+        for(std::size_t i=0;i<n;++i) {
+            check(r.scale[i]>0&&decimal_power(r.scale[i]),"reduction scale is not a power product of 2 and 5");
+            for(std::size_t j=0;j<n;++j) {
+                const Z factor=r.scale[i]*r.scale[j];
+                check(p.e(i,j)==r.e_content*factor*r.E(i,j)&&p.f(i,j)==r.f_content*factor*r.F(i,j),
+                      "reduced pencil is not an exact congruence of the input");
+            }
+        }
+        check(symmetric(r.E)==symmetric(p.e)&&symmetric(r.F)==symmetric(p.f)&&diagonal(r.E)==diagonal(p.e),
+              "reduction changed the pencil structure");
+        const auto direct=characteristic(p.e,p.f,1);
+        for(unsigned workers:{1u,3u,0u}) {
+            const auto reduced=reduced_characteristic(p.e,p.f,workers);
+            check(reduced.coefficients==direct.coefficients,"reduced recurrence coefficients differ");
+            check(reduced.terminal_zero&&reduced.exact_divisions==direct.exact_divisions,"reduced recurrence checks");
+            check(reduced.max_coefficient_bits==direct.max_coefficient_bits,"reduced coefficient bits");
+            check(reduced.max_workspace_bits<=direct.max_workspace_bits,"reduced workspace is longer");
+            check(!r.trivial||reduced.max_workspace_bits==direct.max_workspace_bits,"trivial reduction changed the workspace");
+        }
+        // The oracle proves the mapped coefficients against the original pencil.
+        check(check_coefficients(p.e,p.f,direct.coefficients,2).verified,"oracle rejected reduced coefficients");
+        return r;
+    }
     void oracle_matches_bareiss(const Pencil& p) {
         const auto n=p.e.n;
         const auto c=characteristic(p.e,p.f).coefficients;
@@ -142,6 +191,37 @@ int main() {
                 oracle_matches_bareiss(random_pencil(n,false,false,false,width,60));
             }
         }
+        // 2-adic/5-adic congruence and content reduction before the recurrence.
+        for(std::size_t n:{1u,2u,3u,7u,12u}) {
+            for(unsigned width:{3u,90u}) {
+                reduction_matches_recurrence(random_pencil(n,true,true,true,width,35));
+                const auto lumped=reduction_matches_recurrence(decimal_pencil(random_pencil(n,true,true,true,width,35),1000,40));
+                check(!lumped.trivial,"decimal pencil was not reduced");
+                reduction_matches_recurrence(decimal_pencil(random_pencil(n,false,true,true,width,60),50,8));
+                reduction_matches_recurrence(decimal_pencil(random_pencil(n,true,false,true,width,60),25,1));
+                reduction_matches_recurrence(decimal_pencil(random_pencil(n,false,false,false,width,60),1,1));
+            }
+        }
+        {
+            // Odd entries with a unit gcd leave nothing to remove.
+            ZMatrix e=identity<Z>(2),f(2);
+            e(1,1)=3;
+            f(0,0)=7; f(0,1)=f(1,0)=1; f(1,1)=5;
+            const auto r=reduce_pencil(e,f);
+            check(r.trivial&&r.E.data==e.data&&r.F.data==f.data,"irreducible pencil was changed");
+            // A zero F has content zero, which the reduction treats as one.
+            const auto zero=reduction_matches_recurrence({identity<Z>(3),ZMatrix(3)});
+            check(zero.f_content==1,"zero stiffness content");
+        }
+        invalid([] {
+            reduce_pencil(identity<Z>(2),identity<Z>(3));
+        },"reduction accepted mismatched dimensions");
+        invalid([] {
+            reduced_characteristic(ZMatrix(2),identity<Z>(2),2);
+        },"reduced recurrence accepted a singular leading matrix");
+        invalid([] {
+            reduced_characteristic(identity<Z>(2),identity<Z>(2),65);
+        },"reduced recurrence accepted excess workers");
         invalid([] {
             characteristic(identity<Z>(2),identity<Z>(2),65);
         },"recurrence accepted excess workers");

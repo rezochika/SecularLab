@@ -29,6 +29,8 @@ Ruling: high-precision candidate arithmetic uses Boost's GMP backend. MPFR is no
 required. None of its approximate operations establishes an acceptance claim.
 Ruling: logarithmic coefficient storage avoids exponent overflow in repeated
 squaring; insignificant terms may be dropped ONLY in candidate arithmetic.
+(Since superseded by mantissas with exact binary exponents; see ALGORITHM.md section 3.
+The rule on dropped terms is unchanged.)
 
 Completion record: the exact primitives, fixed and affine recurrence, logarithmic
 Graeffe, exact certificate/replay, CLI, matrix inputs and shared configurations were
