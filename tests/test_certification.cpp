@@ -111,6 +111,35 @@ static void malformed_certificates() {
     const std::vector<RootCertificate> duplicates={{0,Q(1),Q(1),Q(0),"1.00"},{1,Q(1),Q(1),Q(0),"1.00"}};
     require(!verify_certificates(repeated,m,duplicates,2).certified,"repeated verify cannot certify distinct full spectrum");
 }
+// Exact-inertia solves whose early attempts fail: the speculation window (roots up to the last
+// stop first, then the rest) must reproduce the serial certificates and every counter.
+static void inertia_window_matches_serial(const QMatrix& k,unsigned digits,unsigned precision,const std::string& name) {
+    Options options;
+    options.digits=digits;
+    options.precision=precision;
+    options.max_precision=1024;
+    options.polynomial_certification=false;
+    std::string serial_text;
+    SolveResult serial;
+    for(unsigned workers:{1u,2u,3u,8u}) {
+        options.oracle_workers=workers;
+        auto result=solve(k,identity<Q>(k.n),options);
+        require(result.certified&&result.certification_method=="exact_inertia",name+": inertia solve certifies");
+        require(result.certification_attempts>1,name+": an earlier attempt must fail");
+        std::ostringstream text;
+        write_certificates(text,result.roots,digits);
+        if(workers==1) {
+            serial_text=text.str();
+            serial=result;
+            continue;
+        }
+        require(text.str()==serial_text,name+": certificates depend on workers");
+        require(result.inertia_evaluations==serial.inertia_evaluations&&
+                result.certification_attempts==serial.certification_attempts&&
+                result.graeffe_steps==serial.graeffe_steps&&result.attempts==serial.attempts&&
+                result.working_digits==serial.working_digits,name+": counters depend on workers");
+    }
+}
 int main() {
     try {
         QMatrix k(2);
@@ -146,6 +175,20 @@ int main() {
         require(tied.roots[0].lower==Q(5,4)&&tied.roots[0].upper==Q(5,4)&&
                 tied.roots[1].lower==Q(1,4)&&tied.roots[1].upper==Q(1,4),"half ties use exact singleton certificates");
         malformed_certificates();
+        // Precision-limited: 64 working digits cannot give 80 places, so the first attempts stop
+        // at root 0 and later ones run root 0 alone before fanning out.
+        QMatrix tridiagonal(5);
+        for(std::size_t i=0;i<5;++i) {
+            tridiagonal(i,i)=Q(static_cast<long>(2*i+3));
+            if(i+1<5)tridiagonal(i,i+1)=tridiagonal(i+1,i)=1;
+        }
+        inertia_window_matches_serial(tridiagonal,80,64,"precision-limited window");
+        // A tight pair below separated roots: early attempts stop inside the pair.
+        QMatrix pair(6);
+        for(std::size_t i=0;i<4;++i)pair(i,i)=Q(static_cast<long>(9-i));
+        pair(4,4)=1;
+        pair(5,5)=Q(1)+parse_rational("1e-30");
+        inertia_window_matches_serial(pair,3,64,"clustered window");
         std::cout<<"PASS certificate proof regression\n";
     }
     catch(const std::exception& ex) {

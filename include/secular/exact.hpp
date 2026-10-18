@@ -174,7 +174,7 @@ namespace secular {
         unsigned long modular_prime=0;
     };
     SquarefreeResult check_squarefree(const std::vector<Z>& coefficients);
-    // 0 selects hardware concurrency, capped at eight; explicit counts are 1..64.
+    // 0 selects the hardware thread count (at most 64); explicit counts are 1..64.
     unsigned oracle_worker_count(unsigned requested,std::size_t jobs);
     struct OrderedRun {
         // The first index whose job returned false or threw; the job count when none did.

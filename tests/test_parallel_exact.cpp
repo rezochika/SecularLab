@@ -96,7 +96,7 @@ namespace {
             check(actual.max_workspace_bits==reference.max_workspace_bits,"workspace statistic differs from full T_k-c_k I");
             check(actual.max_coefficient_bits==reference.max_coefficient_bits,"coefficient bits differ");
             check(actual.exact_divisions==n+n*per_stage,"recurrence division count");
-            check(workers==0?actual.workers>=1&&actual.workers<=8:actual.workers==std::min<std::size_t>(workers,n),
+            check(workers==0?actual.workers>=1&&actual.workers<=64:actual.workers==std::min<std::size_t>(workers,n),
                   "recurrence workers not clamped to stage rows");
         }
     }

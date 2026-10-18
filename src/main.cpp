@@ -40,8 +40,9 @@ half-away-from-zero. Auto verify derives its polynomial from the input matrices.
 Oracle auto proves the coefficient identity modulo proven primes, using n+1 Bareiss
 determinants when inconclusive or estimated cheaper; bareiss always uses them.
 Workers run fixed-pencil recurrence rows, oracle jobs and the roots of an exact-inertia
-proof: 0 means automatic (at most 8); explicit 1..64 is clamped to the jobs of each phase.
-Results never depend on it.
+proof: 0 means every hardware thread (at most 64); explicit 1..64 is clamped to
+the jobs of each phase and also bounds peak memory; under CPU quotas or job limits,
+pass the quota. Results never depend on it.
 --no-coefficient-check forces solve to use inertia and is forbidden for verify.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum

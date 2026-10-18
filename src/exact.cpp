@@ -268,9 +268,12 @@ namespace secular {
             std::vector<std::jthread> helpers;
         };
         // Checked exact quotient written into an existing integer, keeping its allocation.
-        void exact_divide_into(Z& q,const Z& a,const Z& b) {
-            if(b==0||!mpz_divisible_p(a.get_mpz_t(),b.get_mpz_t()))throw std::logic_error("non-exact integer division");
-            mpz_divexact(q.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+        // One truncating division and a zero-remainder test cost less than a divisibility
+        // test followed by divexact. q and the scratch remainder r must be distinct objects.
+        void exact_divide_into(Z& q,const Z& a,const Z& b,Z& r) {
+            if(b==0)throw std::logic_error("non-exact integer division");
+            mpz_tdiv_qr(q.get_mpz_t(),r.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+            if(r!=0)throw std::logic_error("non-exact integer division");
         }
         void add_product(Z& sum,const Z& a,const Z& b) {
             if(mpz_sgn(b.get_mpz_t()))mpz_addmul(sum.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
@@ -748,9 +751,8 @@ namespace secular {
         if(!out)throw std::runtime_error("matrix write failed");
     }
     Z exact_divide(const Z& a,const Z& b) {
-        if(b==0||!mpz_divisible_p(a.get_mpz_t(),b.get_mpz_t()))throw std::logic_error("non-exact integer division");
-        Z q;
-        mpz_divexact(q.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+        Z q,r;
+        exact_divide_into(q,a,b,r);
         return q;
     }
     ZMatrix multiply(const ZMatrix& a,const ZMatrix& b) {
@@ -761,7 +763,7 @@ namespace secular {
     }
     Z determinant(ZMatrix a) {
         const auto n=a.n;
-        Z previous=1;
+        Z previous=1,update,remainder;
         int sign=1;
         for(std::size_t k=0;k+1<n;++k) {
             std::size_t row=k;
@@ -774,8 +776,9 @@ namespace secular {
             Z pivot=a(k,k);
             for(std::size_t i=k+1;i<n;++i) {
                 for(std::size_t j=k+1;j<n;++j) {
-                    Z v=pivot*a(i,j)-a(i,k)*a(k,j);
-                    a(i,j)=exact_divide(v,previous);
+                    mpz_mul(update.get_mpz_t(),pivot.get_mpz_t(),a(i,j).get_mpz_t());
+                    mpz_submul(update.get_mpz_t(),a(i,k).get_mpz_t(),a(k,j).get_mpz_t());
+                    exact_divide_into(a(i,j),update,previous,remainder);
                 }
                 a(i,k)=0;
             }
@@ -837,7 +840,7 @@ namespace secular {
                 return out;
             }
             ZMatrix a=original;
-            Z previous=1;
+            Z previous=1,update,remainder;
             for(std::size_t k=0;k<a.n;++k) {
                 poll(cancelled);
                 std::size_t p=k;
@@ -859,10 +862,10 @@ namespace secular {
                 if(sign>0)++out.positive;
                 else ++out.negative;
                 for(std::size_t i=k+1;i<a.n;++i)for(std::size_t j=i;j<a.n;++j) {
-                    Z v=pivot*a(i,j)-a(i,k)*a(k,j);
-                    v=exact_divide(v,previous);
-                    a(i,j)=v;
-                    a(j,i)=v;
+                    mpz_mul(update.get_mpz_t(),pivot.get_mpz_t(),a(i,j).get_mpz_t());
+                    mpz_submul(update.get_mpz_t(),a(i,k).get_mpz_t(),a(k,j).get_mpz_t());
+                    exact_divide_into(a(i,j),update,previous,remainder);
+                    a(j,i)=a(i,j);
                 }
                 previous=std::move(pivot);
             }
@@ -1097,7 +1100,7 @@ namespace secular {
         for(std::size_t i=0;i<n;++i)for(std::size_t c=symmetric_pencil?i:0;c<n;++c)s(i,c)=j(i,c);
         if(!fused)t=ZMatrix(n);
         std::vector<std::vector<Z>> accumulators(workers,std::vector<Z>(n));
-        std::vector<Z> products(workers),diagonal_t(fused?n:0);
+        std::vector<Z> products(workers),remainders(workers),diagonal_t(fused?n:0);
         std::vector<std::size_t> row_bits(n),row_divisions(n);
         auto stored=[&](const ZMatrix& a,std::size_t row,std::size_t column)->const Z& {
             return symmetric_pencil&&column<row?a(column,row):a(row,column);
@@ -1118,7 +1121,7 @@ namespace secular {
                 std::size_t width=0;
                 for(std::size_t c=i+1;c<n;++c) {
                     width=std::max(width,bits(acc[c]));
-                    exact_divide_into(next(i,c),acc[c],e(i,i));
+                    exact_divide_into(next(i,c),acc[c],e(i,i),remainders[slot]);
                     const Z& entry=next(i,c);
                     if(entry!=0&&bits(e(c,c))+bits(entry)>width) {
                         mpz_mul(products[slot].get_mpz_t(),e(c,c).get_mpz_t(),entry.get_mpz_t());
@@ -1147,18 +1150,18 @@ namespace secular {
                 r.max_workspace_bits=std::max({r.max_workspace_bits,row_bits[i],bits(entry)});
             }
             if(fused)for(std::size_t i=0;i<n;++i) {
-                exact_divide_into(next(i,i),diagonal_t[i],e(i,i));
+                exact_divide_into(next(i,i),diagonal_t[i],e(i,i),remainders[0]);
                 ++r.exact_divisions;
             }
             else team.run(n,[&](std::size_t i,unsigned slot) {
                 // S_k=E^-1(T_k-c_k I): row division for diagonal E, otherwise J(T_k-c_k I)/d.
                 const std::size_t first=symmetric_pencil?i:0;
-                if(diagonal_e)for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),t(i,c),e(i,i));
+                if(diagonal_e)for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),t(i,c),e(i,i),remainders[slot]);
                 else {
                     auto& acc=accumulators[slot];
                     for(std::size_t c=first;c<n;++c)mpz_set_ui(acc[c].get_mpz_t(),0);
                     for(std::size_t l=0;l<n;++l)if(j(i,l)!=0)for(std::size_t c=first;c<n;++c)add_product(acc[c],j(i,l),t(l,c));
-                    for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),acc[c],d);
+                    for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),acc[c],d,remainders[slot]);
                 }
                 row_divisions[i]=n-first;
             });
@@ -1365,7 +1368,7 @@ namespace secular {
         if(requested>64)throw std::invalid_argument("oracle workers must be 0..64");
         if(jobs==0)return 0;
         unsigned workers=requested;
-        if(workers==0)workers=std::min(8u,std::max(1u,std::thread::hardware_concurrency()));
+        if(workers==0)workers=std::min(64u,std::max(1u,std::thread::hardware_concurrency()));
         return static_cast<unsigned>(std::min<std::size_t>(workers,jobs));
     }
     OrderedRun run_ordered(std::size_t jobs,unsigned workers,const std::function<bool(std::size_t,const CancelCheck&)>& job) {
@@ -1458,7 +1461,10 @@ namespace secular {
         primitive(a);
         // Fixed proven primes; a modular gcd of one is sufficient, never a
         // nontrivial modular gcd (which may merely reflect colliding roots).
-        for(unsigned long prime:{2UL,3UL,5UL,7UL,11UL,65537UL})
+        // The three primes below 2^32 (2^31-1, 2^32-5, 2^32-17) follow, in this order,
+        // so an earlier witness is still reported; they make the exact fallback rare
+        // when small primes divide the leading coefficient or discriminant.
+        for(unsigned long prime:{2UL,3UL,5UL,7UL,11UL,65537UL,2147483647UL,4294967291UL,4294967279UL})
             if(modular_squarefree(a,prime))return {false,prime};
         for(std::size_t i=1;i<a.size();++i)b.push_back(a[i]*static_cast<unsigned long>(i));
         primitive(b);
