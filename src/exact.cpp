@@ -1,13 +1,17 @@
 #include "secular/exact.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <fstream>
 #include <sstream>
 #include <limits>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace secular {
@@ -157,6 +161,468 @@ namespace secular {
             }
             return a.size()==1;
         }
+        // A persistent team for indexed jobs: the calling thread plus size()-1 helpers.
+        // Indices are claimed in increasing order and claiming stops soon after a failure.
+        // Every claimed index runs, so every index below the lowest failing one has run, and
+        // that exception is rethrown, as a serial loop would report it. Exact results never
+        // depend on the schedule.
+        class Team {
+        public:
+            explicit Team(unsigned workers) {
+                try {
+                    helpers.reserve(workers>1?workers-1:0);
+                    for(unsigned slot=1;slot<workers;++slot)helpers.emplace_back([this,slot] {
+                        serve(slot);
+                    });
+                }
+                catch(...) {
+                    stop();
+                    throw;
+                }
+            }
+            Team(const Team&)=delete;
+            Team& operator=(const Team&)=delete;
+            ~Team() {
+                stop();
+            }
+            unsigned size()const {
+                return static_cast<unsigned>(helpers.size()+1);
+            }
+            // Runs body(index,slot) for every index below count; slot < size() selects
+            // per-thread scratch space. Returns after every claimed job has finished.
+            void run(std::size_t count,const std::function<void(std::size_t,unsigned)>& body) {
+                if(count==0)return;
+                errors.assign(count,nullptr);
+                job=&body;
+                jobs=count;
+                next.store(0);
+                failed.store(false);
+                {
+                    std::lock_guard lock(mutex);
+                    active=helpers.size();
+                    ++generation;
+                }
+                start.notify_all();
+                work(0);
+                {
+                    std::unique_lock lock(mutex);
+                    done.wait(lock,[&] {
+                        return active==0;
+                    });
+                }
+                job=nullptr;
+                for(const auto& error:errors)if(error)std::rethrow_exception(error);
+            }
+        private:
+            void work(unsigned slot) {
+                while(!failed.load()) {
+                    const auto index=next.fetch_add(1);
+                    if(index>=jobs)break;
+                    try {
+                        (*job)(index,slot);
+                    }
+                    catch(...) {
+                        errors[index]=std::current_exception();
+                        failed.store(true);
+                    }
+                }
+            }
+            void serve(unsigned slot) {
+                std::size_t seen=0;
+                for(;;) {
+                    {
+                        std::unique_lock lock(mutex);
+                        start.wait(lock,[&] {
+                            return stopping||generation!=seen;
+                        });
+                        if(stopping)return;
+                        seen=generation;
+                    }
+                    work(slot);
+                    std::lock_guard lock(mutex);
+                    if(--active==0)done.notify_one();
+                }
+            }
+            void stop() {
+                {
+                    std::lock_guard lock(mutex);
+                    stopping=true;
+                }
+                start.notify_all();
+                helpers.clear();
+            }
+            std::mutex mutex;
+            std::condition_variable start,done;
+            std::size_t generation=0,active=0,jobs=0;
+            bool stopping=false;
+            const std::function<void(std::size_t,unsigned)>* job=nullptr;
+            std::atomic<std::size_t> next{0};
+            std::atomic<bool> failed{false};
+            std::vector<std::exception_ptr> errors;
+            // Last member: helpers are joined before anything they use is destroyed.
+            std::vector<std::jthread> helpers;
+        };
+        // Checked exact quotient written into an existing integer, keeping its allocation.
+        void exact_divide_into(Z& q,const Z& a,const Z& b) {
+            if(b==0||!mpz_divisible_p(a.get_mpz_t(),b.get_mpz_t()))throw std::logic_error("non-exact integer division");
+            mpz_divexact(q.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+        }
+        void add_product(Z& sum,const Z& a,const Z& b) {
+            if(mpz_sgn(b.get_mpz_t()))mpz_addmul(sum.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+        }
+        using SparseRows=std::vector<std::vector<std::pair<std::size_t,const Z*>>>;
+        SparseRows sparse_rows(const ZMatrix& a) {
+            SparseRows rows(a.n);
+            for(std::size_t i=0;i<a.n;++i)for(std::size_t j=0;j<a.n;++j)if(a(i,j)!=0)rows[i].emplace_back(j,&a(i,j));
+            return rows;
+        }
+        // |[z^m] det(zE-F)| <= [z^m] prod_i(ceil||E_i|| z+ceil||F_i||): expand det(zE-F)
+        // multilinearly in its rows and bound each mixed determinant by Hadamard's
+        // inequality. Returned in descending powers, like the coefficients.
+        std::vector<Z> identity_bound(const ZMatrix& e,const ZMatrix& f) {
+            auto norm=[](const ZMatrix& a,std::size_t i) {
+                Z square=0,root,remainder;
+                for(std::size_t j=0;j<a.n;++j)mpz_addmul(square.get_mpz_t(),a(i,j).get_mpz_t(),a(i,j).get_mpz_t());
+                mpz_sqrtrem(root.get_mpz_t(),remainder.get_mpz_t(),square.get_mpz_t());
+                if(remainder!=0)++root;
+                return root;
+            };
+            std::vector<Z> ascending {
+                1
+            };
+            for(std::size_t i=0;i<e.n;++i) {
+                const Z row_e=norm(e,i),row_f=norm(f,i);
+                std::vector<Z> product(ascending.size()+1);
+                for(std::size_t k=0;k<ascending.size();++k) {
+                    mpz_addmul(product[k].get_mpz_t(),row_f.get_mpz_t(),ascending[k].get_mpz_t());
+                    mpz_addmul(product[k+1].get_mpz_t(),row_e.get_mpz_t(),ascending[k].get_mpz_t());
+                }
+                ascending=std::move(product);
+            }
+            return {ascending.rbegin(),ascending.rend()};
+        }
+        bool determinant_identity(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned workers) {
+            auto check_point=[&](std::size_t k) {
+                Z x=-Z(static_cast<unsigned long>(k+1));
+                ZMatrix a(e.n);
+                for(std::size_t i=0;i<a.data.size();++i)a.data[i]=x*e.data[i]-f.data[i];
+                return determinant(std::move(a))==evaluate(c,x);
+            };
+            if(workers==1) {
+                for(std::size_t k=0;k<=e.n;++k)if(!check_point(k))return false;
+                return true;
+            }
+            std::atomic<std::size_t> next{0};
+            std::atomic<bool> valid{true};
+            std::mutex exception_mutex;
+            std::exception_ptr first_exception;
+            {
+                // jthread destruction joins even if a later thread creation throws.
+                // Inputs are read-only; determinant matrices and GMP temporaries are
+                // local to each job. Success consumes all n+1 distinct points.
+                std::vector<std::jthread> threads;
+                threads.reserve(workers);
+                for(unsigned i=0;i<workers;++i)threads.emplace_back([&] {
+                    try {
+                        for(;;) {
+                            const auto k=next.fetch_add(1,std::memory_order_relaxed);
+                            if(k>e.n)break;
+                            if(!check_point(k))valid.store(false,std::memory_order_relaxed);
+                        }
+                    } catch(...) {
+                        std::lock_guard lock(exception_mutex);
+                        if(!first_exception)first_exception=std::current_exception();
+                    }
+                });
+            }
+            if(first_exception)std::rethrow_exception(first_exception);
+            return valid.load(std::memory_order_relaxed);
+        }
+#if GMP_NUMB_BITS==64&&defined(__SIZEOF_INT128__)
+#define SECULAR_MODULAR_ORACLE 1
+        using Word=std::uint64_t;
+        __extension__ typedef unsigned __int128 Wide;
+        // Montgomery arithmetic modulo an odd p < 2^62. Values are residues below p
+        // in Montgomery form, except the arguments of to() and results of from().
+        struct Montgomery {
+            Word p,negative_inverse,r2;
+            explicit Montgomery(Word modulus):p(modulus) {
+                Word inverse=modulus;
+                // Newton iteration doubles the correct low bits: 3, 6, ..., 96 >= 64.
+                for(int i=0;i<5;++i)inverse*=2-modulus*inverse;
+                negative_inverse=0-inverse;
+                const Wide r=(Wide(1)<<64)%modulus;
+                r2=static_cast<Word>(r*r%modulus);
+            }
+            Word reduce(Wide t)const {
+                const Word m=static_cast<Word>(t)*negative_inverse;
+                const Word u=static_cast<Word>((t+Wide(m)*p)>>64);
+                return u>=p?u-p:u;
+            }
+            Word mul(Word a,Word b)const {
+                return reduce(Wide(a)*b);
+            }
+            Word to(Word a)const {
+                return mul(a,r2);
+            }
+            Word from(Word a)const {
+                return reduce(a);
+            }
+            Word add(Word a,Word b)const {
+                const Word s=a+b;
+                return s>=p?s-p:s;
+            }
+            Word sub(Word a,Word b)const {
+                return a>=b?a-b:a+p-b;
+            }
+            Word power(Word a,Word exponent)const {
+                Word result=to(1);
+                for(;exponent;exponent>>=1) {
+                    if(exponent&1)result=mul(result,a);
+                    a=mul(a,a);
+                }
+                return result;
+            }
+            Word inverse(Word a)const {
+                return power(a,p-2);
+            }
+        };
+        // Miller-Rabin with the first twelve prime bases (2..37) is deterministic below
+        // 318665857834031151167461 (about 3.18e23), far above every modulus below 2^62.
+        bool proven_prime(Word n) {
+            static constexpr Word bases[]= {
+                2,3,5,7,11,13,17,19,23,29,31,37
+            };
+            for(Word q:bases)if(n%q==0)return n==q;
+            const Montgomery m(n);
+            Word d=n-1;
+            unsigned s=0;
+            for(;!(d&1);d>>=1)++s;
+            const Word one=m.to(1),minus_one=m.to(n-1);
+            for(Word a:bases) {
+                Word x=m.power(m.to(a),d);
+                if(x==one||x==minus_one)continue;
+                bool composite=true;
+                for(unsigned r=1;r<s&&composite;++r) {
+                    x=m.mul(x,x);
+                    if(x==minus_one)composite=false;
+                }
+                if(composite)return false;
+            }
+            return true;
+        }
+        Word prime_at(std::size_t index) {
+            static std::mutex table_mutex;
+            static std::vector<Word> table;
+            std::lock_guard lock(table_mutex);
+            Word candidate=table.empty()?(Word(1)<<62)-1:table.back()-2;
+            for(;table.size()<=index;candidate-=2) {
+                // Every modulus exceeds 2^61; the singular-E test below relies on it.
+                if(candidate<(Word(1)<<61))throw std::length_error("oracle prime sequence exhausted");
+                if(proven_prime(candidate))table.push_back(candidate);
+            }
+            return table[index];
+        }
+        // All residues stay in 64-bit words: unsigned long is only 32 bits on Windows.
+        Word residue(const Z& z,Word p) {
+            const auto size=mpz_size(z.get_mpz_t());
+            if(size==0)return 0;
+            const Word r=mpn_mod_1(mpz_limbs_read(z.get_mpz_t()),static_cast<mp_size_t>(size),p);
+            return mpz_sgn(z.get_mpz_t())<0&&r?p-r:r;
+        }
+        // A=E^-1 F over F_p in Montgomery form, and det(E) mod p. False if p divides det(E).
+        bool reduce_pencil(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,const Montgomery& m,
+                           std::vector<Word>& a,Word& det_e) {
+            const auto n=e.n;
+            a.resize(n*n);
+            for(std::size_t i=0;i<a.size();++i)a[i]=m.to(residue(f.data[i],m.p));
+            det_e=m.to(1);
+            if(diagonal_e) {
+                for(std::size_t i=0;i<n;++i) {
+                    const Word pivot=m.to(residue(e(i,i),m.p));
+                    if(pivot==0)return false;
+                    det_e=m.mul(det_e,pivot);
+                    const Word inverse=m.inverse(pivot);
+                    for(std::size_t j=0;j<n;++j)a[i*n+j]=m.mul(inverse,a[i*n+j]);
+                }
+                return true;
+            }
+            // Gauss-Jordan on [E | F].
+            std::vector<Word> left(n*n);
+            for(std::size_t i=0;i<left.size();++i)left[i]=m.to(residue(e.data[i],m.p));
+            for(std::size_t k=0;k<n;++k) {
+                std::size_t row=k;
+                while(row<n&&left[row*n+k]==0)++row;
+                if(row==n)return false;
+                if(row!=k) {
+                    for(std::size_t j=0;j<n;++j) {
+                        std::swap(left[k*n+j],left[row*n+j]);
+                        std::swap(a[k*n+j],a[row*n+j]);
+                    }
+                    det_e=m.sub(0,det_e);
+                }
+                const Word pivot=left[k*n+k];
+                det_e=m.mul(det_e,pivot);
+                const Word inverse=m.inverse(pivot);
+                for(std::size_t j=0;j<n;++j) {
+                    left[k*n+j]=m.mul(left[k*n+j],inverse);
+                    a[k*n+j]=m.mul(a[k*n+j],inverse);
+                }
+                for(std::size_t i=0;i<n;++i)if(i!=k&&left[i*n+k]) {
+                    const Word factor=left[i*n+k];
+                    for(std::size_t j=0;j<n;++j) {
+                        left[i*n+j]=m.sub(left[i*n+j],m.mul(factor,left[k*n+j]));
+                        a[i*n+j]=m.sub(a[i*n+j],m.mul(factor,a[k*n+j]));
+                    }
+                }
+            }
+            return true;
+        }
+        // det(zI-A) over F_p in descending powers: similarity reduction to upper Hessenberg
+        // form, then the Hessenberg determinant recurrence. Exact over any field.
+        std::vector<Word> hessenberg_charpoly(std::vector<Word>& h,std::size_t n,const Montgomery& m) {
+            auto at=[&](std::size_t i,std::size_t j)->Word& {
+                return h[i*n+j];
+            };
+            for(std::size_t j=0;j+2<n;++j) {
+                std::size_t pivot=j+1;
+                while(pivot<n&&at(pivot,j)==0)++pivot;
+                if(pivot==n)continue;
+                if(pivot!=j+1) {
+                    for(std::size_t c=0;c<n;++c)std::swap(at(pivot,c),at(j+1,c));
+                    for(std::size_t r=0;r<n;++r)std::swap(at(r,pivot),at(r,j+1));
+                }
+                const Word inverse=m.inverse(at(j+1,j));
+                for(std::size_t r=j+2;r<n;++r) {
+                    if(at(r,j)==0)continue;
+                    // Row r -= u*row j+1, then column j+1 += u*column r: a similarity.
+                    const Word u=m.mul(at(r,j),inverse);
+                    for(std::size_t c=j;c<n;++c)at(r,c)=m.sub(at(r,c),m.mul(u,at(j+1,c)));
+                    for(std::size_t q=0;q<n;++q)at(q,j+1)=m.add(at(q,j+1),m.mul(u,at(q,r)));
+                }
+            }
+            // 1-based: p_k=(z-h_kk)p_(k-1)-sum_(i<k) h_ik*(h_(i+1,i)...h_(k,k-1))*p_(i-1).
+            // Each p_k is stored in ascending powers.
+            std::vector<std::vector<Word>> p(n+1);
+            p[0]= {
+                m.to(1)
+            };
+            for(std::size_t k=1;k<=n;++k) {
+                auto& current=p[k];
+                current.assign(k+1,0);
+                const auto& previous=p[k-1];
+                const Word diagonal_entry=at(k-1,k-1);
+                for(std::size_t d=0;d<previous.size();++d) {
+                    current[d+1]=m.add(current[d+1],previous[d]);
+                    current[d]=m.sub(current[d],m.mul(diagonal_entry,previous[d]));
+                }
+                Word product=m.to(1);
+                for(std::size_t i=k-1;i>=1;--i) {
+                    product=m.mul(product,at(i,i-1));
+                    if(product==0)break;
+                    const Word coefficient=m.mul(at(i-1,k-1),product);
+                    const auto& lower=p[i-1];
+                    for(std::size_t d=0;d<lower.size();++d)current[d]=m.sub(current[d],m.mul(coefficient,lower[d]));
+                }
+            }
+            return {p[n].rbegin(),p[n].rend()};
+        }
+        enum class ModularStatus {
+            verified,refuted,inconclusive
+        };
+        struct ModularOutcome {
+            ModularStatus status=ModularStatus::inconclusive;
+            std::size_t moduli=0;
+            unsigned workers=0;
+        };
+        // Size-only work estimates in limb operations. They only choose between two exact
+        // proofs: residues cost every modulus a pass over every entry and coefficient, which for
+        // tiny orders with very long entries exceeds the n+1 Bareiss determinants.
+        bool bareiss_clearly_cheaper(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,std::size_t need_bits) {
+            const double n=static_cast<double>(e.n);
+            double residue_limbs=0,entry_limbs=0,coefficient_limbs=0;
+            for(std::size_t i=0;i<e.data.size();++i) {
+                const double le=static_cast<double>(mpz_size(e.data[i].get_mpz_t()));
+                const double lf=static_cast<double>(mpz_size(f.data[i].get_mpz_t()));
+                residue_limbs+=le+lf;
+                entry_limbs=std::max(entry_limbs,std::max(le,lf)+1);
+            }
+            for(const auto& v:c) {
+                const double l=static_cast<double>(mpz_size(v.get_mpz_t()));
+                residue_limbs+=l;
+                coefficient_limbs=std::max(coefficient_limbs,l);
+            }
+            const double modular=std::ceil(static_cast<double>(need_bits)/61)*(residue_limbs+2*n*n*n);
+            if(modular<1e7)return false;
+            // Per point: form xE-F and evaluate q, then (n-k)^2 updates of two products and an
+            // exact division of k-minor-sized entries, with multiplication modelled as m^1.6.
+            double elimination=0;
+            for(std::size_t k=1;k<e.n;++k)elimination+=(n-k)*(n-k)*4*std::pow(static_cast<double>(k)*entry_limbs,1.6);
+            const double bareiss=(n+1)*(n*n*entry_limbs+(n+1)*coefficient_limbs+elimination);
+            return 2*bareiss<modular;
+        }
+        // For p not dividing det(E), det(zE-F) = det(E) det(zI-E^-1 F) holds over F_p.
+        // Agreement modulo distinct primes whose product exceeds max_m(|c_m|+B_m) >= |c_m-P_m|
+        // proves c = P, the coefficients of det(zE-F); one disagreement refutes c.
+        ModularOutcome modular_identity(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested) {
+            const auto n=e.n;
+            const auto bound=identity_bound(e,f);
+            Z need=0;
+            for(std::size_t k=0;k<=n;++k) {
+                Z v=abs(c[k])+bound[k];
+                if(v>need)need=std::move(v);
+            }
+            ModularOutcome out;
+            // Every modulus exceeds 2^61, so k matching moduli have a product above 2^(61k),
+            // and 61k >= bits(need) gives a product above need.
+            const std::size_t need_bits=bits(need);
+            if(bareiss_clearly_cheaper(e,f,c,need_bits))return out;
+            const bool diagonal_e=diagonal(e);
+            constexpr unsigned char unusable=0,match=1,mismatch=2;
+            std::size_t proven_bits=0,next_prime=0,unusable_count=0;
+            std::optional<Team> team;
+            for(;;) {
+                std::vector<Word> batch;
+                for(std::size_t planned=proven_bits;planned<need_bits;planned+=61)batch.push_back(prime_at(next_prime++));
+                if(!team) {
+                    out.workers=oracle_worker_count(requested,batch.size());
+                    team.emplace(out.workers);
+                }
+                std::vector<unsigned char> outcome(batch.size(),unusable);
+                team->run(batch.size(),[&](std::size_t index,unsigned) {
+                    const Montgomery m(batch[index]);
+                    std::vector<Word> a;
+                    Word det_e=0;
+                    if(!reduce_pencil(e,f,diagonal_e,m,a,det_e))return;
+                    const auto chi=hessenberg_charpoly(a,n,m);
+                    for(std::size_t k=0;k<=n;++k)if(residue(c[k],m.p)!=m.from(m.mul(det_e,chi[k]))) {
+                        outcome[index]=mismatch;
+                        return;
+                    }
+                    outcome[index]=match;
+                });
+                for(std::size_t index=0;index<batch.size();++index) {
+                    if(outcome[index]==unusable) {
+                        ++unusable_count;
+                        continue;
+                    }
+                    ++out.moduli;
+                    if(outcome[index]==mismatch) {
+                        out.status=ModularStatus::refuted;
+                        return out;
+                    }
+                    proven_bits+=61;
+                }
+                if(proven_bits>=need_bits) {
+                    out.status=ModularStatus::verified;
+                    return out;
+                }
+                // Distinct primes above 2^61 dividing a nonzero det(E) <= bound[0] number fewer
+                // than bits(bound[0])/61. Reaching that count proves det(E)=0: inconclusive.
+                if(unusable_count*61>=bits(bound[0]))return out;
+            }
+        }
+#endif
     }
     Z pow10(unsigned d) {
         if(d>100000)throw std::invalid_argument("decimal scale exceeds limit");
@@ -413,23 +879,96 @@ namespace secular {
         for(std::size_t i=0;i<f.data.size();++i)a.data[i]=s.get_den()*f.data[i]-s.get_num()*e.data[i];
         return inertia(a);
     }
-    CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f) {
+    CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned requested) {
         if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
-        Z d=determinant(e);
+        const auto n=e.n;
+        if(n==0||e.data.size()!=n*n||f.data.size()!=n*n)throw std::invalid_argument("invalid pencil storage");
+        const unsigned workers=oracle_worker_count(requested,n);
+        const bool diagonal_e=diagonal(e);
+        // The determinant and adjugate of a diagonal E are products and exact quotients.
+        Z d=1;
+        if(diagonal_e)for(std::size_t i=0;i<n;++i)d*=e(i,i);
+        else d=determinant(e);
         if(d==0)throw std::invalid_argument("singular mass/leading matrix");
-        ZMatrix j=adjugate(e),s=j;
+        ZMatrix j(n);
+        if(diagonal_e)for(std::size_t i=0;i<n;++i)j(i,i)=exact_divide(d,e(i,i));
+        else j=adjugate(e);
+        // S_k is the z^(n-1-k) coefficient of adj(zE-F), hence symmetric for a symmetric
+        // pencil. Then only entries (i,c) with c>=i of S_k are computed and stored.
+        const bool symmetric_pencil=symmetric(e)&&symmetric(f);
+        const bool fused=symmetric_pencil&&diagonal_e;
+        const auto rows=sparse_rows(f);
+        ZMatrix s(n),next(n),t;
+        for(std::size_t i=0;i<n;++i)for(std::size_t c=symmetric_pencil?i:0;c<n;++c)s(i,c)=j(i,c);
+        if(!fused)t=ZMatrix(n);
+        std::vector<std::vector<Z>> accumulators(workers,std::vector<Z>(n));
+        std::vector<Z> products(workers),diagonal_t(fused?n:0);
+        std::vector<std::size_t> row_bits(n),row_divisions(n);
+        auto stored=[&](const ZMatrix& a,std::size_t row,std::size_t column)->const Z& {
+            return symmetric_pencil&&column<row?a(column,row):a(row,column);
+        };
+        // Rows of a stage are independent jobs: every worker count gives identical integers.
+        Team team(workers);
         CoefficientResult r;
+        r.workers=workers;
         r.coefficients.push_back(d);
-        for(std::size_t k=1;k<=e.n;++k) {
-            ZMatrix t=multiply(f,s);
+        for(std::size_t k=1;k<=n;++k) {
+            if(fused)team.run(n,[&](std::size_t i,unsigned slot) {
+                // Row i of T_k=F*S_(k-1) on and right of the diagonal. Off-diagonal entries
+                // are divided straight into S_k. The mirrored entry T_k(c,i)=E_cc*S_k(i,c)
+                // enters the workspace statistic, formed only when it could raise the maximum.
+                auto& acc=accumulators[slot];
+                for(std::size_t c=i;c<n;++c)mpz_set_ui(acc[c].get_mpz_t(),0);
+                for(const auto& [l,value]:rows[i])for(std::size_t c=i;c<n;++c)add_product(acc[c],*value,stored(s,l,c));
+                std::size_t width=0;
+                for(std::size_t c=i+1;c<n;++c) {
+                    width=std::max(width,bits(acc[c]));
+                    exact_divide_into(next(i,c),acc[c],e(i,i));
+                    const Z& entry=next(i,c);
+                    if(entry!=0&&bits(e(c,c))+bits(entry)>width) {
+                        mpz_mul(products[slot].get_mpz_t(),e(c,c).get_mpz_t(),entry.get_mpz_t());
+                        width=std::max(width,bits(products[slot]));
+                    }
+                }
+                mpz_swap(diagonal_t[i].get_mpz_t(),acc[i].get_mpz_t());
+                row_bits[i]=width;
+                row_divisions[i]=n-1-i;
+            });
+            else team.run(n,[&](std::size_t i,unsigned) {
+                for(std::size_t c=0;c<n;++c)mpz_set_ui(t(i,c).get_mpz_t(),0);
+                for(const auto& [l,value]:rows[i])for(std::size_t c=0;c<n;++c)add_product(t(i,c),*value,stored(s,l,c));
+                std::size_t width=0;
+                for(std::size_t c=0;c<n;++c)if(c!=i)width=std::max(width,bits(t(i,c)));
+                row_bits[i]=width;
+            });
             Z trace=0;
-            for(std::size_t i=0;i<e.n;++i)trace+=t(i,i);
-            Z c=exact_divide(trace,Z(static_cast<unsigned long>(k)));
+            for(std::size_t i=0;i<n;++i)trace+=fused?diagonal_t[i]:t(i,i);
+            const Z c=exact_divide(trace,Z(static_cast<unsigned long>(k)));
             ++r.exact_divisions;
             r.coefficients.push_back(-c);
-            for(std::size_t i=0;i<e.n;++i)t(i,i)-=c;
-            for(auto& v:t.data)r.max_workspace_bits=std::max(r.max_workspace_bits,bits(v));
-            s=apply_e_inverse(e,j,d,t,&r.exact_divisions);
+            for(std::size_t i=0;i<n;++i) {
+                Z& entry=fused?diagonal_t[i]:t(i,i);
+                entry-=c;
+                r.max_workspace_bits=std::max({r.max_workspace_bits,row_bits[i],bits(entry)});
+            }
+            if(fused)for(std::size_t i=0;i<n;++i) {
+                exact_divide_into(next(i,i),diagonal_t[i],e(i,i));
+                ++r.exact_divisions;
+            }
+            else team.run(n,[&](std::size_t i,unsigned slot) {
+                // S_k=E^-1(T_k-c_k I): row division for diagonal E, otherwise J(T_k-c_k I)/d.
+                const std::size_t first=symmetric_pencil?i:0;
+                if(diagonal_e)for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),t(i,c),e(i,i));
+                else {
+                    auto& acc=accumulators[slot];
+                    for(std::size_t c=first;c<n;++c)mpz_set_ui(acc[c].get_mpz_t(),0);
+                    for(std::size_t l=0;l<n;++l)if(j(i,l)!=0)for(std::size_t c=first;c<n;++c)add_product(acc[c],j(i,l),t(l,c));
+                    for(std::size_t c=first;c<n;++c)exact_divide_into(next(i,c),acc[c],d);
+                }
+                row_divisions[i]=n-first;
+            });
+            for(const auto count:row_divisions)r.exact_divisions+=count;
+            std::swap(s,next);
         }
         r.terminal_zero=std::all_of(s.data.begin(),s.data.end(),[](const Z& z) {
             return z==0;
@@ -507,46 +1046,43 @@ namespace secular {
         if(workers==0)workers=std::min(8u,std::max(1u,std::thread::hardware_concurrency()));
         return static_cast<unsigned>(std::min<std::size_t>(workers,jobs));
     }
-    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested) {
+    OracleReport check_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested,CoefficientOracle oracle) {
         // Validate before scheduling; public Matrix fields may have been edited.
         const auto workers=oracle_worker_count(requested,e.n<max_dimension+1?e.n+1:0);
+        OracleReport report;
         if(e.n==0||e.n>max_dimension||e.n!=f.n||c.size()!=e.n+1||
-           e.data.size()!=e.n*e.n||f.data.size()!=e.n*e.n)return false;
-        auto check_point=[&](std::size_t k) {
-            Z x=-Z(static_cast<unsigned long>(k+1));
-            ZMatrix a(e.n);
-            for(std::size_t i=0;i<a.data.size();++i)a.data[i]=x*e.data[i]-f.data[i];
-            return determinant(std::move(a))==evaluate(c,x);
-        };
-        if(workers==1) {
-            for(std::size_t k=0;k<=e.n;++k)if(!check_point(k))return false;
-            return true;
+           e.data.size()!=e.n*e.n||f.data.size()!=e.n*e.n)return report;
+#ifdef SECULAR_MODULAR_ORACLE
+        if(oracle==CoefficientOracle::automatic) {
+            const auto modular=modular_identity(e,f,c,requested);
+            if(modular.status!=ModularStatus::inconclusive) {
+                report.verified=modular.status==ModularStatus::verified;
+                report.method="modular";
+                report.moduli=modular.moduli;
+                report.workers=modular.workers;
+                return report;
+            }
         }
-        std::atomic<std::size_t> next{0};
-        std::atomic<bool> valid{true};
-        std::mutex exception_mutex;
-        std::exception_ptr first_exception;
-        {
-            // jthread destruction joins even if a later thread creation throws.
-            // Inputs are read-only; determinant matrices and GMP temporaries are
-            // local to each job. Success consumes all n+1 distinct points.
-            std::vector<std::jthread> threads;
-            threads.reserve(workers);
-            for(unsigned i=0;i<workers;++i)threads.emplace_back([&] {
-                try {
-                    for(;;) {
-                        const auto k=next.fetch_add(1,std::memory_order_relaxed);
-                        if(k>e.n)break;
-                        if(!check_point(k))valid.store(false,std::memory_order_relaxed);
-                    }
-                } catch(...) {
-                    std::lock_guard lock(exception_mutex);
-                    if(!first_exception)first_exception=std::current_exception();
-                }
-            });
-        }
-        if(first_exception)std::rethrow_exception(first_exception);
-        return valid.load(std::memory_order_relaxed);
+#else
+        (void)oracle;
+#endif
+        // Explicit request, det(E)=0 (every modulus divides det E), or a tiny order with very
+        // long entries where the size estimate favours them: n+1 Bareiss points.
+        report.verified=determinant_identity(e,f,c,workers);
+        report.method="bareiss";
+        report.workers=workers;
+        return report;
+    }
+    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested) {
+        return check_coefficients(e,f,c,requested).verified;
+    }
+    std::uint64_t oracle_prime(std::size_t index) {
+#ifdef SECULAR_MODULAR_ORACLE
+        return prime_at(index);
+#else
+        (void)index;
+        throw std::logic_error("modular oracle requires 64-bit GMP limbs and 128-bit integers");
+#endif
     }
     SquarefreeResult check_squarefree(const std::vector<Z>& c) {
         if(c.size()<2||c.front()==0)throw std::invalid_argument("invalid polynomial");

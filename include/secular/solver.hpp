@@ -11,7 +11,9 @@ namespace secular {
         unsigned max_squarings=128;
         bool full_coefficient_check=true;
         bool check_squarefree=true;
+        // Exact parallel work: coefficient recurrence rows and oracle jobs.
         unsigned oracle_workers=0;
+        CoefficientOracle coefficient_oracle=CoefficientOracle::automatic;
         bool polynomial_certification=true;
         std::function<void(const std::string&)> progress;
     };
@@ -32,7 +34,10 @@ namespace secular {
         unsigned working_digits {},graeffe_steps {},attempts {};
         bool coefficient_identity_verified=false;
         double initialization_seconds=0,squarefree_seconds=0;
-        unsigned oracle_workers=0;
+        unsigned oracle_workers=0,recurrence_workers=0;
+        // "modular" or "bareiss" when the coefficient identity was checked, else "none".
+        std::string coefficient_oracle="none";
+        std::size_t oracle_moduli=0;
         unsigned long squarefree_modular_prime=0;
         std::string certification_method="none";
         // Includes the two positive-definiteness guards as well as shifted checks.

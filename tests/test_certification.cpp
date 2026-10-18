@@ -1,4 +1,5 @@
 #include "secular/solver.hpp"
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -19,7 +20,9 @@ static void compare_methods(const QMatrix& k,unsigned digits,const std::vector<s
             "polynomial proof requires verified identity and actual sign checks");
     require(early_fallback?fast.inertia_evaluations>=2:fast.inertia_evaluations==2,
             "fast solve avoids shifted inertia unless earlier candidates require fallback");
-    require(fast.oracle_workers==2&&fast.squarefree_modular_prime!=0,"oracle workers and modular witness reported");
+    require(fast.coefficient_oracle=="modular"&&fast.oracle_moduli>=1&&
+            fast.oracle_workers==std::min<std::size_t>(2,fast.oracle_moduli)&&fast.recurrence_workers==2&&
+            fast.squarefree_modular_prime!=0,"oracle, recurrence workers and modular witness reported");
     for(std::size_t i=0;i<expected.size();++i)require(fast.roots[i].decimal==expected[i],"hand-known rounded eigenvalue");
     auto checked=verify_certificates(k,m,fast.roots,digits,options);
     require(checked.certified&&checked.status=="VERIFIED"&&checked.certification_method=="polynomial",

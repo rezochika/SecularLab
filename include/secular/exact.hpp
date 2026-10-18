@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <cstddef>
+#include <cstdint>
 
 namespace secular {
     using Z=mpz_class;
@@ -71,8 +72,12 @@ namespace secular {
         // descending powers, actual signs: det(zE-F)
         std::size_t exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
         bool terminal_zero {};
+        // Threads that computed the rows of each recurrence stage.
+        unsigned workers {};
     };
-    CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f);
+    // Workers as for oracle_worker_count, clamped to the n rows of a stage.
+    // Every worker count gives identical results.
+    CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
     // Output [k][j] is coefficient of z^(n-k) t^j in det(zE-F0-tF1).
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1);
     Z evaluate(const std::vector<Z>& coefficients,const Z& x);
@@ -87,6 +92,27 @@ namespace secular {
     SquarefreeResult check_squarefree(const std::vector<Z>& coefficients);
     // 0 selects hardware concurrency, capped at eight; explicit counts are 1..64.
     unsigned oracle_worker_count(unsigned requested,std::size_t jobs);
+    enum class CoefficientOracle {
+        // Multimodular characteristic polynomial; n+1 Bareiss determinants if inconclusive.
+        automatic,
+        // Always the n+1-point Bareiss determinant check.
+        bareiss
+    };
+    struct OracleReport {
+        bool verified=false;
+        // Check that decided: "modular", "bareiss", or "none" for rejected storage.
+        std::string method="none";
+        // Primes whose residues decided a modular proof or refutation.
+        std::size_t moduli=0;
+        // Threads used by the deciding check.
+        unsigned workers=0;
+    };
+    // Exact proof or refutation of det(zE-F) = sum_k coefficients[k] z^(n-k).
+    OracleReport check_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& coefficients,
+                                    unsigned workers,CoefficientOracle oracle=CoefficientOracle::automatic);
     bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& coefficients,unsigned workers=1);
+    // The index-th prime of the fixed descending sequence of proven primes below 2^62
+    // used by the modular oracle (index 0 is the largest).
+    std::uint64_t oracle_prime(std::size_t index);
     bool has_repeated_roots(const std::vector<Z>& coefficients);
 }

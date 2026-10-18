@@ -43,16 +43,33 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         run(['solve','--matrix',matrix/'spd3.mtx','--digits','30','--workers',workers,'--certification','auto','--out',out])
         result=json.loads((out/'result.json').read_text())
         assert result['certification_method']=='polynomial' and result['polynomial_sign_evaluations']>0
-        assert result['oracle_workers']==workers and result['inertia_evaluations']==2 # mandatory K/M SPD guards only
+        assert result['coefficient_oracle']=='modular' and result['oracle_moduli']>=1
+        # Each phase clamps the requested workers to its own jobs: moduli, or rows of a stage.
+        assert result['oracle_workers']==min(workers,result['oracle_moduli']) and result['recurrence_workers']==min(workers,3)
+        assert result['inertia_evaluations']==2 # mandatory K/M SPD guards only
         assert result['times_seconds']['initialization']>=0 and result['times_seconds']['squarefree']>=0
-        checks+=3
+        checks+=5
         run(['coefficients','--matrix',matrix/'spd3.mtx','--workers',workers,'--out',d/('coeff'+str(workers))])
     for artifact in ('coefficients.tsv','eigenvalues.tsv'):
         assert (d/'workers1'/artifact).read_bytes()==(d/'workers4'/artifact).read_bytes(); checks+=1
     assert (d/'coeff1/coefficients.tsv').read_bytes()==(d/'coeff4/coefficients.tsv').read_bytes(); checks+=1
+    # The explicit n+1-point Bareiss oracle proves the same identity with unchanged artifacts.
+    for workers in (1, 4):
+        out=d/('bareiss'+str(workers))
+        run(['solve','--matrix',matrix/'spd3.mtx','--digits','30','--workers',workers,'--oracle','bareiss','--out',out])
+        result=json.loads((out/'result.json').read_text())
+        assert result['coefficient_oracle']=='bareiss' and result['oracle_moduli']==0 and result['oracle_workers']==workers
+        assert result['coefficient_identity_verified'] and result['certification_method']=='polynomial'
+        for artifact in ('coefficients.tsv','eigenvalues.tsv'):
+            assert (out/artifact).read_bytes()==(d/'workers1'/artifact).read_bytes()
+        checks+=4
+    run(['coefficients','--matrix',matrix/'spd3.mtx','--oracle','bareiss','--out',d/'coeff_bareiss'])
+    assert (d/'coeff_bareiss/coefficients.tsv').read_bytes()==(d/'coeff1/coefficients.tsv').read_bytes(); checks+=1
     for workers in (1, 4):
         run(['coefficients','--matrix',matrix/'galerkin2_K0.mtx','--mass',matrix/'galerkin2_M.mtx','--affine',matrix/'galerkin2_K1.mtx','--workers',workers,'--out',d/('affine'+str(workers))])
     assert (d/'affine1/coefficients_affine.tsv').read_bytes()==(d/'affine4/coefficients_affine.tsv').read_bytes(); checks+=1
+    run(['coefficients','--matrix',matrix/'galerkin2_K0.mtx','--mass',matrix/'galerkin2_M.mtx','--affine',matrix/'galerkin2_K1.mtx','--oracle','bareiss','--out',d/'affine_bareiss'])
+    assert (d/'affine_bareiss/coefficients_affine.tsv').read_bytes()==(d/'affine1/coefficients_affine.tsv').read_bytes(); checks+=1
     cert=d/'workers1/eigenvalues.tsv'
     for method,expected in (('auto','polynomial'),('inertia','exact_inertia')):
         out=d/('verify_'+method)
@@ -93,13 +110,27 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
             out=d/(mode+'_invalid_method')
             run([*base,'--certification','approximate','--out',out],2)
             assert not out.exists(); checks+=1
+        out=d/(mode+'_invalid_oracle')
+        run([*base,'--oracle','approximate','--out',out],2)
+        assert not out.exists(); checks+=1
+    # An oracle choice without a coefficient identity check is contradictory.
+    for args in (['solve','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--oracle','bareiss'],
+                 ['coefficients','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--oracle','auto'],
+                 ['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--certification','inertia','--oracle','bareiss']):
+        out=d/('oracle_without_check_'+args[0])
+        run([*args,'--out',out],2)
+        assert not out.exists(); checks+=1
     run(['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--no-coefficient-check','--out',d/'weaken_verify'],2)
     assert not (d/'weaken_verify').exists(); checks+=1
     run(['solve','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--out',d/'unchecked'])
     assert json.loads((d/'unchecked/result.json').read_text())['certification_method']=='exact_inertia'; checks+=1
     run(['solve','--matrix',matrix/'spd3.mtx','--workers','64','--certification','inertia','--out',d/'clamped'])
     result=json.loads((d/'clamped/result.json').read_text())
-    assert result['oracle_workers']==4 and result['certification_method']=='exact_inertia'; checks+=1
+    assert result['oracle_workers']==min(64,result['oracle_moduli']) and result['recurrence_workers']==3
+    assert result['certification_method']=='exact_inertia'; checks+=2
+    run(['solve','--matrix',matrix/'spd3.mtx','--workers','64','--oracle','bareiss','--out',d/'clamped_bareiss'])
+    result=json.loads((d/'clamped_bareiss/result.json').read_text())
+    assert result['oracle_workers']==4 and result['coefficient_oracle']=='bareiss'; checks+=1 # n+1 points
     for name in ('spd2','spd3','spring10','spring20','cluster3'):
         out=d/name
         run(['solve','--matrix',matrix/(name+'.mtx'),'--digits','30','--out',out])
