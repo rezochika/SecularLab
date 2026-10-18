@@ -307,7 +307,9 @@ namespace secular {
         // evaluator. Neither changes a sign, only the work: the counter records evaluations.
         class SignEvaluator {
         public:
-            explicit SignEvaluator(const std::vector<Z>& coefficients):co(coefficients) {}
+            explicit SignEvaluator(const std::vector<Z>& coefficients):co(coefficients) {
+                for(const auto& c:co)coefficient_bits+=bits(c);
+            }
             const std::vector<Z>& coefficients()const {
                 return co;
             }
@@ -331,6 +333,12 @@ namespace secular {
                 for(const auto& t:tables)
                     if(t.power>=*power&&t.power-*power<=slack&&(!best||t.power<best->power))best=&t;
                 if(!best) {
+                    // A table holds about n^2/2 factors 10^m in all, while one general evaluation
+                    // holds two numbers of n such factors. Very long denominators, as a replayed
+                    // file may contain, are therefore evaluated directly.
+                    // n <= 257 and m <= 10^5 keep this estimate far inside 64 bits.
+                    const std::uint64_t n=co.size(),power_bits=*power*3322/1000+1;
+                    if(coefficient_bits+n*(n+1)/2*power_bits>table_bits)return polynomial_sign(co,x);
                     if(tables.size()==capacity)tables.erase(tables.begin());
                     tables.push_back({*power,ScaledPolynomial(co,pow10(static_cast<unsigned>(*power)))});
                     best=&tables.back();
@@ -338,10 +346,13 @@ namespace secular {
                 return best->values.sign(x);
             }
             // Proposal widths of one candidate differ by 8 and 24 places; rounding midpoints of
-            // the default widths need 15 places fewer than their endpoints.
+            // the default widths need 15 places fewer than their endpoints. A table may hold
+            // about 2^28 bits (32 MiB); order 256 at 1000 places needs under half of that.
             static constexpr unsigned long max_power=100000,slack=16;
             static constexpr std::size_t capacity=4;
+            static constexpr std::uint64_t table_bits=std::uint64_t(1)<<28;
             const std::vector<Z>& co;
+            std::uint64_t coefficient_bits=0;
             std::map<Q,int> memo;
             std::vector<Table> tables;
         };
