@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace secular {
     using Z=mpz_class;
@@ -61,6 +62,26 @@ namespace secular {
     };
     Inertia inertia(const ZMatrix& a);
     Inertia inertia(const QMatrix& a);
+    // Exact congruence certificate for any proposal x. It requires x upper triangular with a
+    // nonzero diagonal, so det(x)!=0, and B = x^T*a*x strictly diagonally dominant. Then
+    // inertia(a) = inertia(B) is the sign count of diag(B), with nullity zero. Returns nullopt
+    // when either test fails, which says nothing about a.
+    std::optional<Inertia> certify_congruence(const ZMatrix& a,const ZMatrix& x);
+    // certify_congruence for x = 2^(precision_bits-8)*L^-T, truncated to integers. L is an
+    // untrusted floating-point LDL^T factor of a at precision_bits (16..4096), set per object.
+    // A zero floating pivot, or a factor far beyond the scale of a, also gives nullopt.
+    std::optional<Inertia> congruence_inertia(const ZMatrix& a,unsigned precision_bits);
+    struct DefinitenessReport {
+        bool positive_definite=false;
+        // Exact test that decided: "diagonal" (sign count), "congruence" or "elimination"
+        // (the fraction-free inertia).
+        std::string method;
+        // Proposal precision of a deciding congruence, 0 otherwise.
+        unsigned precision_bits=0;
+    };
+    // Exact positive-definiteness test of a symmetric matrix: the diagonal sign count, else
+    // congruence_inertia at 64, 128 and 256 bits, else inertia(). Every outcome is exact.
+    DefinitenessReport check_positive_definite(const ZMatrix& a);
     struct IntegerPencil {
         ZMatrix E,F;
         Z scale;

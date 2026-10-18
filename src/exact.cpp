@@ -868,6 +868,134 @@ namespace secular {
         for(std::size_t i=0;i<a.data.size();++i)b.data[i]=a.data[i].get_num()*exact_divide(l,a.data[i].get_den());
         return inertia(b);
     }
+    std::optional<Inertia> certify_congruence(const ZMatrix& a,const ZMatrix& x) {
+        if(a.n!=x.n)throw std::invalid_argument("congruence dimensions differ");
+        if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+        const auto n=a.n;
+        // Upper triangular with a nonzero diagonal, so det(x)!=0 and x^T*a*x is a congruence.
+        for(std::size_t i=0;i<n;++i) {
+            if(x(i,i)==0)return std::nullopt;
+            for(std::size_t j=0;j<i;++j)if(x(i,j)!=0)return std::nullopt;
+        }
+        // B = x^T*c with c = a*x. Both are needed only on and above the diagonal: b(i,j), i<=j,
+        // reads c(m,j) for m<=i, and c(m,j) reads x(l,j) for l<=j.
+        ZMatrix c(n),b(n);
+        for(std::size_t m=0;m<n;++m)for(std::size_t l=0;l<n;++l) {
+            const auto aml=a(m,l).get_mpz_t();
+            if(mpz_sgn(aml)==0)continue;
+            for(std::size_t j=std::max(l,m);j<n;++j) {
+                const auto xlj=x(l,j).get_mpz_t();
+                if(mpz_sgn(xlj)!=0)mpz_addmul(c(m,j).get_mpz_t(),aml,xlj);
+            }
+        }
+        for(std::size_t i=0;i<n;++i)for(std::size_t m=0;m<=i;++m) {
+            const auto xmi=x(m,i).get_mpz_t();
+            if(mpz_sgn(xmi)==0)continue;
+            for(std::size_t j=i;j<n;++j) {
+                const auto cmj=c(m,j).get_mpz_t();
+                if(mpz_sgn(cmj)!=0)mpz_addmul(b(i,j).get_mpz_t(),xmi,cmj);
+            }
+        }
+        // A strictly diagonally dominant symmetric B is nonsingular, and so is every
+        // diag(B)+t(B-diag(B)), 0<=t<=1. No eigenvalue crosses zero along that path, so B,
+        // and by Sylvester's law a, has the inertia of diag(B), with nullity zero.
+        Inertia out;
+        Z off;
+        for(std::size_t i=0;i<n;++i) {
+            off=0;
+            for(std::size_t j=0;j<n;++j)if(j!=i) {
+                const auto v=(i<j?b(i,j):b(j,i)).get_mpz_t();
+                if(mpz_sgn(v)<0)mpz_sub(off.get_mpz_t(),off.get_mpz_t(),v);
+                else mpz_add(off.get_mpz_t(),off.get_mpz_t(),v);
+            }
+            if(mpz_cmpabs(b(i,i).get_mpz_t(),off.get_mpz_t())<=0)return std::nullopt;
+            if(mpz_sgn(b(i,i).get_mpz_t())>0)++out.positive;
+            else ++out.negative;
+        }
+        return out;
+    }
+    std::optional<Inertia> congruence_inertia(const ZMatrix& a,unsigned precision_bits) {
+        if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+        if(precision_bits<16||precision_bits>4096)throw std::invalid_argument("congruence precision must be 16..4096 bits");
+        const auto n=a.n;
+        // Untrusted proposal: an LDL^T of a without pivoting, in floating point whose precision
+        // is set on every object; the process-global default precision is never read or changed.
+        // The upper triangle holds the active matrix, the strict lower triangle L's multipliers.
+        const mpf_class zero(0,precision_bits);
+        std::vector<mpf_class> f(n*n,zero),w(n*n,zero);
+        mpf_class product=zero,sum=zero;
+        auto at=[n](std::vector<mpf_class>& v,std::size_t i,std::size_t j) {
+            return v[i*n+j].get_mpf_t();
+        };
+        std::size_t entry_bits=0;
+        for(std::size_t i=0;i<n;++i)for(std::size_t j=i;j<n;++j) {
+            mpf_set_z(at(f,i,j),a(i,j).get_mpz_t());
+            entry_bits=std::max(entry_bits,bits(a(i,j)));
+        }
+        for(std::size_t k=0;k<n;++k) {
+            const auto pivot=at(f,k,k);
+            if(mpf_sgn(pivot)==0)return std::nullopt;
+            for(std::size_t i=k+1;i<n;++i) {
+                if(mpf_sgn(at(f,k,i))==0)continue;
+                const auto l=at(f,i,k);
+                mpf_div(l,at(f,k,i),pivot);
+                for(std::size_t j=i;j<n;++j)if(mpf_sgn(at(f,k,j))!=0) {
+                    mpf_mul(product.get_mpf_t(),l,at(f,k,j));
+                    mpf_sub(at(f,i,j),at(f,i,j),product.get_mpf_t());
+                }
+            }
+        }
+        // W = L^-1, unit lower triangular, one column at a time.
+        for(std::size_t j=0;j<n;++j) {
+            mpf_set_ui(at(w,j,j),1);
+            for(std::size_t i=j+1;i<n;++i) {
+                mpf_set_ui(sum.get_mpf_t(),0);
+                for(std::size_t m=j;m<i;++m)if(mpf_sgn(at(f,i,m))!=0&&mpf_sgn(at(w,m,j))!=0) {
+                    mpf_mul(product.get_mpf_t(),at(f,i,m),at(w,m,j));
+                    mpf_sub(sum.get_mpf_t(),sum.get_mpf_t(),product.get_mpf_t());
+                }
+                mpf_set(at(w,i,j),sum.get_mpf_t());
+            }
+        }
+        // x = 2^s*W^T, truncated to integers: 2^s on the diagonal and zero below it by
+        // construction. Any integers would do for soundness; only the dominance test decides.
+        // Entries far beyond the input's scale mean a failed factorization, and are refused
+        // before they are converted, which bounds the exact work.
+        const mp_bitcnt_t scale=precision_bits-8;
+        const long limit=static_cast<long>(precision_bits+entry_bits);
+        ZMatrix x(n);
+        for(std::size_t r=0;r<n;++r) {
+            mpz_setbit(x(r,r).get_mpz_t(),scale);
+            for(std::size_t c=r+1;c<n;++c) {
+                const auto v=at(w,c,r);
+                if(mpf_sgn(v)==0)continue;
+                long exponent=0;
+                mpf_get_d_2exp(&exponent,v);
+                if(exponent>limit)return std::nullopt;
+                mpf_mul_2exp(product.get_mpf_t(),v,scale);
+                mpz_set_f(x(r,c).get_mpz_t(),product.get_mpf_t());
+            }
+        }
+        return certify_congruence(a,x);
+    }
+    DefinitenessReport check_positive_definite(const ZMatrix& a) {
+        if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
+        DefinitenessReport report;
+        if(diagonal(a)) {
+            report.method="diagonal";
+            report.positive_definite=inertia(a).positive==a.n;
+            return report;
+        }
+        for(unsigned precision: {64u,128u,256u})if(const auto in=congruence_inertia(a,precision)) {
+            report.method="congruence";
+            report.precision_bits=precision;
+            report.positive_definite=in->positive==a.n;
+            return report;
+        }
+        report.method="elimination";
+        report.positive_definite=inertia(a).positive==a.n;
+        return report;
+    }
     IntegerPencil integer_pencil(const QMatrix& k,const QMatrix& m) {
         if(k.n!=m.n)throw std::invalid_argument("K and M dimensions differ");
         Z l=1;

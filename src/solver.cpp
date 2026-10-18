@@ -586,9 +586,9 @@ namespace secular {
         out.order=k.n;
         out.determinant_scale=p.scale;
         ++out.inertia_evaluations;
-        if(inertia(p.E).positive!=k.n)throw std::invalid_argument("root recovery requires positive definite M");
+        if(!check_positive_definite(p.E).positive_definite)throw std::invalid_argument("root recovery requires positive definite M");
         ++out.inertia_evaluations;
-        if(inertia(p.F).positive!=k.n)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
+        if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
         out.initialization_seconds=elapsed(begin);
         compute_coefficients(p,o,out,o.full_coefficient_check);
         if(o.check_squarefree&&repeated_spectrum(out)) {
@@ -690,9 +690,9 @@ namespace secular {
             auto p=integer_pencil(k,m);
             out.determinant_scale=p.scale;
             ++out.inertia_evaluations;
-            if(inertia(p.E).positive!=k.n)throw std::invalid_argument("verification requires positive definite M");
+            if(!check_positive_definite(p.E).positive_definite)throw std::invalid_argument("verification requires positive definite M");
             ++out.inertia_evaluations;
-            if(inertia(p.F).positive!=k.n)throw std::invalid_argument("verification requires positive definite K");
+            if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("verification requires positive definite K");
             out.initialization_seconds=elapsed(begin);
             if(o.polynomial_certification) {
                 // Verification starts with the original matrices; neither saved

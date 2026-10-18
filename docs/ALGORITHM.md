@@ -29,9 +29,10 @@ Then E,F are integer matrices and
 The output coefficient file stores the left-hand polynomial, with L recorded. Its leading
 coefficient is det(E), not 1. Eigenvalues are unchanged by this known scalar factor.
 
-The solver proves positive definiteness of both E and F by exact inertia before root recovery.
-For a diagonal matrix, such as the usual lumped mass matrix, that inertia is the sign count of
-its diagonal entries, in O(n) after the O(n^2) test that it is diagonal.
+The solver proves positive definiteness of both E and F exactly before root recovery.
+For a diagonal matrix, such as the usual lumped mass matrix, that is the sign count of
+its diagonal entries, in O(n) after the O(n^2) test that it is diagonal. Any other matrix is
+first tried with the congruence certificate of section 4 and otherwise decided by exact inertia.
 The general coefficient command only requires nonsingular E.
 
 ## 2. Exact characteristic coefficients
@@ -204,7 +205,9 @@ When all active diagonal entries are zero but an off-diagonal remains, the progr
 back to exact rational block elimination. A block [[0,b],[b,0]], b!=0, contributes one
 positive and one negative eigenvalue; its Schur complement is formed exactly. An entirely
 zero remainder contributes its dimension to the nullity. No tiny-pivot tolerance, guessed
-sign or floating-point Cholesky decision enters this certificate.
+sign or floating-point Cholesky decision enters this certificate. The positive-definiteness
+checks may instead use the congruence certificate at the end of this section, in which floating
+point only proposes and an exact integer test decides.
 
 For candidate k (0 is largest), construct exact rational endpoints ell,u around its rounded
 center. Proposal widths depend on the requested decimal places, candidate magnitude, nearest
@@ -290,11 +293,43 @@ holds for `verify`: under the verified identity, a row whose exact signs fail al
 inertia counts, so only a failure of the shared row checks reaches the inertia replay. Neither
 change alters what is accepted; only `inertia_evaluations` and the timings change.
 
+### Congruence certificate for positive definiteness
+
+Each positive-definiteness check needs one inertia. Elimination on F is nevertheless the costliest
+part of initialization, because Bareiss entries grow into leading minors about k times as long as
+an entry. For a symmetric A that is not diagonal, `check_positive_definite` therefore first tries
+a certificate whose integers stay short.
+
+- Proposal, untrusted. A GMP floating-point LDL^T of A without pivoting, at a precision P set on
+  each object, gives W, approximately L^-1. The process-global default precision is neither read
+  nor changed. X = trunc(2^(P-8)*W^T) is an integer matrix, upper triangular with 2^(P-8) on its
+  diagonal by construction. A zero floating pivot abandons the proposal, and so does an entry of
+  W above 2^(P+b), where b is the bit length of the longest entry of A; that bounds the exact work.
+- Check, exact. X must be upper triangular with a nonzero diagonal, so det X != 0. B = X^T A X
+  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|.
+
+When the check passes, B is symmetric and strictly diagonally dominant. B and every
+diag(B)+t(B-diag(B)), 0<=t<=1, are then nonsingular (Levy-Desplanques), so no eigenvalue crosses
+zero along that path, and B has the inertia of diag(B). By Sylvester's law of inertia so does A,
+with nullity zero. A is positive definite exactly when every b_ii is positive. A negative b_ii
+refutes positive definiteness just as exactly.
+
+The floating-point stage decides nothing: a poor proposal can only fail the exact check. A tie in
+the dominance test is a failure. A singular A always fails, because a singular B cannot be
+strictly diagonally dominant. Proposals at P = 64, 128 and 256 are tried in that order; when
+none passes, the fraction-free inertia above decides, unchanged. The work is O(n^3)
+floating-point operations at a few limbs, plus about n^3/6 integer products of entries near
+2P+b bits. On BCSSTK05 the 64-bit proposal certifies F in 0.02 s, where elimination took
+0.84 s. The oil-rig K certifies at 64 bits too. Badly conditioned matrices need more: integer
+Hilbert matrices of order 16 need 128 bits, order 30 needs 256, and from about order 60 they fall
+back to elimination. The shifted endpoint inertias of the inertia certificate still use elimination.
+
 ## 5. Replay and failure reporting
 
 `verify` rereads the matrices and TSV and re-establishes positive definiteness, endpoint
 inertias, root indices, disjointness, exact rounding and every radius bound. It does not trust
-an earlier status string. The replay shares the native inertia implementation with the solver;
+an earlier status string. The replay shares the native inertia implementation and the
+positive-definiteness certificate with the solver;
 calling it an independent-authorship proof checker would overstate its independence.
 
 - `CERTIFIED`, exit 0: all n eigenvalues accepted with stated decimal rounding and radii.
