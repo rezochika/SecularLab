@@ -324,6 +324,19 @@ namespace secular {
                 memo.emplace(x,sign);
                 return sign;
             }
+            // The memoized sign at x, if any. It changes nothing, so concurrent readers may share it.
+            std::optional<int> known(const Q& x)const {
+                const auto hit=memo.find(x);
+                if(hit==memo.end())return std::nullopt;
+                return hit->second;
+            }
+            // Accounts for a sign requested elsewhere exactly as operator() would have: a point
+            // missing from the memo counts one evaluation and stores its sign, if it was found.
+            void replay(const Q& x,const std::optional<int>& sign,SolveResult& result) {
+                if(memo.count(x))return;
+                ++result.polynomial_sign_evaluations;
+                if(sign)memo.emplace(x,*sign);
+            }
         private:
             struct Table {
                 unsigned long power;
@@ -362,10 +375,12 @@ namespace secular {
             std::map<Q,int> memo;
             std::vector<Table> tables;
         };
-        Inertia counted_inertia(const IntegerPencil& p,const Q& x,SolveResult& result) {
-            ++result.inertia_evaluations;
-            return shifted_inertia(p.F,p.E,x);
-        }
+        // What one root's job did, replayed in root order once a parallel run is over.
+        struct RootTrace {
+            std::size_t inertia_evaluations=0;
+            // Requested sign points in order, each with its sign once that was found.
+            std::vector<std::pair<Q,std::optional<int>>> signs;
+        };
         // All proof paths share the complete metadata and decimal-rounding gate.
         bool valid_rows(const std::vector<RootCertificate>& roots,std::size_t n,unsigned digits) {
             if(n==0||roots.size()!=n||digits<1||digits>1000)return false;
@@ -403,21 +418,27 @@ namespace secular {
             if(row_failure)*row_failure=false;
             return true;
         }
+        // One row per job. The rows up to the first failing one, that row included, are counted
+        // as in the serial loop; that row's exception, if it threw, is rethrown after the counting.
+        // A row above a known failure abandons its eliminations.
         bool inertia_rootset(const IntegerPencil& p,const std::vector<RootCertificate>& roots,
-                             unsigned digits,SolveResult& result) {
+                             unsigned digits,unsigned workers,SolveResult& result) {
             if(!valid_rows(roots,p.E.n,digits))return false;
-            for(std::size_t i=0;i<roots.size();++i) {
+            std::vector<std::size_t> evaluations(roots.size());
+            const auto run=run_ordered(roots.size(),workers,[&](std::size_t i,const CancelCheck& superseded) {
                 const auto& r=roots[i];
-                auto l=counted_inertia(p,r.lower,result);
-                if(r.lower==r.upper) {
-                    if(l.zero!=1||l.positive!=i)return false;
-                }
-                else {
-                    auto u=counted_inertia(p,r.upper,result);
-                    if(l.zero||u.zero||l.positive!=i+1||u.positive!=i)return false;
-                }
-            }
-            return true;
+                auto shifted=[&](const Q& x) {
+                    ++evaluations[i];
+                    return shifted_inertia(p.F,p.E,x,superseded);
+                };
+                const auto l=shifted(r.lower);
+                if(r.lower==r.upper)return l.zero==1&&l.positive==i;
+                const auto u=shifted(r.upper);
+                return !l.zero&&!u.zero&&l.positive==i+1&&u.positive==i;
+            });
+            for(std::size_t i=0;i<roots.size()&&i<=run.stop;++i)result.inertia_evaluations+=evaluations[i];
+            if(run.error)std::rethrow_exception(run.error);
+            return run.stop==roots.size();
         }
         bool valid_matrix_shapes(const QMatrix& k,const QMatrix& m) {
             return k.n>0&&k.n<=max_dimension&&k.n==m.n&&k.data.size()==k.n*k.n&&m.data.size()==m.n*m.n;
@@ -455,7 +476,9 @@ namespace secular {
             out.squarefree_modular_prime=squarefree.modular_prime;
             return squarefree.repeated;
         }
-        std::optional<RootCertificate> certify_one(const IntegerPencil& pencil,SignEvaluator& signs,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work,bool polynomial,SolveResult& result) {
+        // sign(x) gives the exact sign of the polynomial at x, shifted(x) the exact inertia of F-xE.
+        template<class Sign,class Shifted>
+        std::optional<RootCertificate> certify_one(Sign&& sign,Shifted&& shifted,const Q& approx,const Q& separation,std::size_t index,unsigned digits,unsigned work,bool polynomial) {
             if(approx<=0)return std::nullopt;
             const long scale=decimal_scale(approx);
             long places=std::max(static_cast<long>(digits)+8,9-scale);
@@ -481,13 +504,13 @@ namespace secular {
                 Q radius(1,pow10(width));
                 Q lower=center-radius,upper=center+radius;
                 if(polynomial) {
-                    int lo=signs(lower,result),hi=signs(upper,result);
+                    int lo=sign(lower),hi=sign(upper);
                     if(lo==0)upper=lower;
                     else if(hi==0)lower=upper;
                     else if(lo==hi)continue;
                 }
                 else {
-                    auto li=counted_inertia(pencil,lower,result),ui=counted_inertia(pencil,upper,result);
+                    auto li=shifted(lower),ui=shifted(upper);
                     if(li.zero==1&&li.positive==index)upper=lower;
                     else if(ui.zero==1&&ui.positive==index)lower=upper;
                     else if(li.zero||ui.zero||li.positive!=index+1||ui.positive!=index)continue;
@@ -497,9 +520,9 @@ namespace secular {
                     if(hi-lo!=1)continue;
                     Q midpoint(lo+hi,2*pow10(digits));
                     midpoint.canonicalize();
-                    if(signs(midpoint,result)!=0)continue;
+                    if(sign(midpoint)!=0)continue;
                     if(!polynomial) {
-                        auto mi=counted_inertia(pencil,midpoint,result);
+                        auto mi=shifted(midpoint);
                         if(mi.zero!=1||mi.positive!=index)continue;
                     }
                     lower=upper=midpoint;
@@ -515,25 +538,81 @@ namespace secular {
             return std::nullopt;
         }
         // On failure, per_root_failure tells whether it happened before every candidate had a
-        // row: in the mode-independent ordering checks or inside certify_one.
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,SolveResult& result,bool& per_root_failure) {
+        // row: in the mode-independent ordering checks or inside certify_one. Exact inertia
+        // certifies one root per worker, with identical results for every worker count.
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,unsigned workers,SolveResult& result,bool& per_root_failure) {
             per_root_failure=true;
+            const auto count=candidates.size();
             std::vector<Q> approximations;
             for(const auto& candidate:candidates)approximations.push_back(rational(candidate));
-            std::vector<RootCertificate> out;
-            for(std::size_t i=0;i<candidates.size();++i) {
-                if(approximations[i]<=0||(i&&approximations[i]>=approximations[i-1]))return {};
+            // A root's ordering checks precede its certify_one, so the roots below the first one
+            // that fails them, `ordered` in all, are exactly those the serial loop could reach.
+            std::vector<Q> separations(count);
+            std::size_t ordered=count;
+            for(std::size_t i=0;i<count;++i) {
+                if(approximations[i]<=0||(i&&approximations[i]>=approximations[i-1])) {
+                    ordered=i;
+                    break;
+                }
                 Q separation=0;
                 if(i)separation=approximations[i-1]-approximations[i];
-                if(i+1<approximations.size()) {
+                if(i+1<count) {
                     Q gap=approximations[i]-approximations[i+1];
-                    if(gap<=0)return {};
+                    if(gap<=0) {
+                        ordered=i;
+                        break;
+                    }
                     if(separation==0||gap<separation)separation=gap;
                 }
-                auto r=certify_one(p,signs,approximations[i],separation,i,digits,work,polynomial,result);
-                if(!r)return {};
-                out.push_back(std::move(*r));
+                separations[i]=std::move(separation);
             }
+            std::vector<std::optional<RootCertificate>> rows(ordered);
+            if(polynomial) {
+                // Root by root on the shared evaluator, whose scaled tables keep each sign cheap.
+                auto sign=[&](const Q& x) {
+                    return signs(x,result);
+                };
+                auto shifted=[](const Q&)->Inertia {
+                    throw std::logic_error("polynomial certification uses no inertia");
+                };
+                for(std::size_t i=0;i<ordered;++i) {
+                    rows[i]=certify_one(sign,shifted,approximations[i],separations[i],i,digits,work,true);
+                    if(!rows[i])return {};
+                }
+            }
+            else {
+                // One root per job. A job only reads the memo; it records its sign requests and
+                // counts its inertias. Replaying the roots up to the first failing one, in order,
+                // then gives the counters and memo of the serial loop for every worker count. A
+                // root above a known failure abandons its eliminations.
+                std::vector<RootTrace> traces(ordered);
+                const auto run=run_ordered(ordered,workers,[&](std::size_t i,const CancelCheck& superseded) {
+                    auto& trace=traces[i];
+                    auto sign=[&](const Q& x) {
+                        trace.signs.emplace_back(x,std::nullopt);
+                        const auto known=signs.known(x);
+                        const int value=known?*known:polynomial_sign(signs.coefficients(),x);
+                        trace.signs.back().second=value;
+                        return value;
+                    };
+                    auto shifted=[&](const Q& x) {
+                        ++trace.inertia_evaluations;
+                        return shifted_inertia(p.F,p.E,x,superseded);
+                    };
+                    rows[i]=certify_one(sign,shifted,approximations[i],separations[i],i,digits,work,false);
+                    return rows[i].has_value();
+                });
+                for(std::size_t i=0;i<ordered&&i<=run.stop;++i) {
+                    result.inertia_evaluations+=traces[i].inertia_evaluations;
+                    for(const auto& [x,value]:traces[i].signs)signs.replay(x,value,result);
+                }
+                if(run.error)std::rethrow_exception(run.error);
+                if(run.stop<ordered)return {};
+            }
+            if(ordered<count)return {};
+            std::vector<RootCertificate> out;
+            out.reserve(count);
+            for(auto& row:rows)out.push_back(std::move(*row));
             per_root_failure=false;
             if(!valid_rows(out,p.E.n,digits))return {};
             if(polynomial&&!polynomial_rootset(out,signs,p.E.n,digits,result))return {};
@@ -586,9 +665,9 @@ namespace secular {
         out.order=k.n;
         out.determinant_scale=p.scale;
         ++out.inertia_evaluations;
-        if(inertia(p.E).positive!=k.n)throw std::invalid_argument("root recovery requires positive definite M");
+        if(!check_positive_definite(p.E).positive_definite)throw std::invalid_argument("root recovery requires positive definite M");
         ++out.inertia_evaluations;
-        if(inertia(p.F).positive!=k.n)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
+        if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
         out.initialization_seconds=elapsed(begin);
         compute_coefficients(p,o,out,o.full_coefficient_check);
         if(o.check_squarefree&&repeated_spectrum(out)) {
@@ -599,6 +678,7 @@ namespace secular {
         }
         // Signs of the fixed coefficient vector; its scaled tables serve every attempt.
         SignEvaluator signs(out.coefficients);
+        const unsigned certification_workers=oracle_worker_count(o.oracle_workers,k.n);
         for(unsigned work=o.precision;;) {
             ++out.attempts;
             out.working_digits=work;
@@ -635,14 +715,14 @@ namespace secular {
                         std::string method="exact_inertia";
                         bool per_root_failure=false;
                         if(try_polynomial) {
-                            roots=certify_all(p,signs,candidates,o.digits,work,true,out,per_root_failure);
+                            roots=certify_all(p,signs,candidates,o.digits,work,true,certification_workers,out,per_root_failure);
                             if(roots.size()==k.n)method="polynomial";
                         }
                         // With q = det(zE-F) verified, a per-root polynomial failure proves that
                         // exact inertia fails on the same proposals (docs/ALGORITHM.md, section
                         // 4). Only a failure of the final gates is retried with exact inertia.
                         if(roots.size()!=k.n&&!(try_polynomial&&per_root_failure))
-                            roots=certify_all(p,signs,candidates,o.digits,work,false,out,per_root_failure);
+                            roots=certify_all(p,signs,candidates,o.digits,work,false,certification_workers,out,per_root_failure);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);
@@ -690,9 +770,9 @@ namespace secular {
             auto p=integer_pencil(k,m);
             out.determinant_scale=p.scale;
             ++out.inertia_evaluations;
-            if(inertia(p.E).positive!=k.n)throw std::invalid_argument("verification requires positive definite M");
+            if(!check_positive_definite(p.E).positive_definite)throw std::invalid_argument("verification requires positive definite M");
             ++out.inertia_evaluations;
-            if(inertia(p.F).positive!=k.n)throw std::invalid_argument("verification requires positive definite K");
+            if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("verification requires positive definite K");
             out.initialization_seconds=elapsed(begin);
             if(o.polynomial_certification) {
                 // Verification starts with the original matrices; neither saved
@@ -712,7 +792,7 @@ namespace secular {
                 }
                 // A row that fails its exact signs under the verified identity fails exact
                 // inertia too, so only failures of the shared row checks reach inertia.
-                else if(!row_failure&&inertia_rootset(p,roots,digits,out)) {
+                else if(!row_failure&&inertia_rootset(p,roots,digits,oracle_worker_count(o.oracle_workers,k.n),out)) {
                     accepted=true;
                     out.certification_method="exact_inertia";
                 }
