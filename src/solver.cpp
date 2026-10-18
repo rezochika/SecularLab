@@ -420,15 +420,16 @@ namespace secular {
         }
         // One row per job. The rows up to the first failing one, that row included, are counted
         // as in the serial loop; that row's exception, if it threw, is rethrown after the counting.
+        // A row above a known failure abandons its eliminations.
         bool inertia_rootset(const IntegerPencil& p,const std::vector<RootCertificate>& roots,
                              unsigned digits,unsigned workers,SolveResult& result) {
             if(!valid_rows(roots,p.E.n,digits))return false;
             std::vector<std::size_t> evaluations(roots.size());
-            const auto run=run_ordered(roots.size(),workers,[&](std::size_t i) {
+            const auto run=run_ordered(roots.size(),workers,[&](std::size_t i,const CancelCheck& superseded) {
                 const auto& r=roots[i];
                 auto shifted=[&](const Q& x) {
                     ++evaluations[i];
-                    return shifted_inertia(p.F,p.E,x);
+                    return shifted_inertia(p.F,p.E,x,superseded);
                 };
                 const auto l=shifted(r.lower);
                 if(r.lower==r.upper)return l.zero==1&&l.positive==i;
@@ -582,9 +583,10 @@ namespace secular {
             else {
                 // One root per job. A job only reads the memo; it records its sign requests and
                 // counts its inertias. Replaying the roots up to the first failing one, in order,
-                // then gives the counters and memo of the serial loop for every worker count.
+                // then gives the counters and memo of the serial loop for every worker count. A
+                // root above a known failure abandons its eliminations.
                 std::vector<RootTrace> traces(ordered);
-                const auto run=run_ordered(ordered,workers,[&](std::size_t i) {
+                const auto run=run_ordered(ordered,workers,[&](std::size_t i,const CancelCheck& superseded) {
                     auto& trace=traces[i];
                     auto sign=[&](const Q& x) {
                         trace.signs.emplace_back(x,std::nullopt);
@@ -595,7 +597,7 @@ namespace secular {
                     };
                     auto shifted=[&](const Q& x) {
                         ++trace.inertia_evaluations;
-                        return shifted_inertia(p.F,p.E,x);
+                        return shifted_inertia(p.F,p.E,x,superseded);
                     };
                     rows[i]=certify_one(sign,shifted,approximations[i],separations[i],i,digits,work,false);
                     return rows[i].has_value();

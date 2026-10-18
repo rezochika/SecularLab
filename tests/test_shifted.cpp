@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -61,12 +62,21 @@ namespace {
         write_certificates(out,roots,digits);
         return out.str();
     }
+    // Counters of a solve before parallel certification: one root at a time.
+    struct SerialCounts {
+        std::size_t inertia,signs;
+        unsigned attempts;
+    };
     // Solves at several worker counts, where exact inertia must decide. Rows and every counter must
-    // equal those of one worker, the serial order of evaluation.
-    SolveResult inertia_solves_agree(const QMatrix& k,const QMatrix& m,Options options,const std::string& name) {
+    // equal those of one worker, and the counters those the serial loop recorded before it was
+    // parallelized.
+    SolveResult inertia_solves_agree(const QMatrix& k,const QMatrix& m,Options options,const std::string& name,
+                                     const SerialCounts& expected) {
         options.oracle_workers=1;
         const auto serial=solve(k,m,options);
         check(serial.certified&&serial.certification_method=="exact_inertia",name+": serial inertia solve certifies");
+        check(serial.inertia_evaluations==expected.inertia&&serial.polynomial_sign_evaluations==expected.signs&&
+              serial.certification_attempts==expected.attempts,name+": counters of the serial loop");
         for(unsigned workers: {2u,3u,8u,16u}) {
             options.oracle_workers=workers;
             const auto parallel=solve(k,m,options);
@@ -91,25 +101,40 @@ namespace {
         row.radius=below>above?below:above;
         return roots;
     }
+    // Waits until flag is set or the time is up, whichever comes first.
+    void await(const std::atomic<bool>& flag,std::chrono::milliseconds patience) {
+        const auto deadline=std::chrono::steady_clock::now()+patience;
+        while(!flag&&std::chrono::steady_clock::now()<deadline)std::this_thread::yield();
+    }
     void ordered_runs() {
         const std::size_t jobs=64;
         for(unsigned workers: {1u,2u,3u,8u,16u}) {
             const auto label="run_ordered at "+std::to_string(workers)+" workers: ";
-            // fail and fault list the indices whose job returns false or throws "fault <i>".
+            // fail and fault list the jobs that return false or throw "fault <i>". The lowest of them
+            // waits for the highest to finish, so with several workers the higher stop is recorded
+            // first and must be lowered. One worker never reaches the higher job and stops at once.
             auto run=[&](std::vector<std::size_t> fail,std::vector<std::size_t> fault,std::size_t stop,int thrown) {
                 std::vector<std::atomic<int>> runs(jobs);
-                const auto outcome=run_ordered(jobs,workers,[&](std::size_t i) {
+                auto stops=fail;
+                stops.insert(stops.end(),fault.begin(),fault.end());
+                const auto lowest=stops.empty()?jobs:*std::min_element(stops.begin(),stops.end());
+                const auto highest=stops.empty()?jobs:*std::max_element(stops.begin(),stops.end());
+                std::atomic<bool> highest_done{false};
+                const auto outcome=run_ordered(jobs,workers,[&](std::size_t i,const CancelCheck&) {
                     ++runs[i];
-                    // The stopping jobs finish last, so later indices complete before them.
-                    const bool stops=std::find(fail.begin(),fail.end(),i)!=fail.end()||
-                                     std::find(fault.begin(),fault.end(),i)!=fault.end();
-                    std::this_thread::sleep_for(std::chrono::microseconds(stops?3000:(i%5)*100));
-                    if(std::find(fault.begin(),fault.end(),i)!=fault.end())throw std::runtime_error("fault "+std::to_string(i));
-                    return std::find(fail.begin(),fail.end(),i)==fail.end();
+                    if(i==lowest&&lowest!=highest&&workers>1) {
+                        await(highest_done,std::chrono::milliseconds(2000));
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    const bool faults=std::find(fault.begin(),fault.end(),i)!=fault.end();
+                    const bool passes=std::find(fail.begin(),fail.end(),i)==fail.end();
+                    if(i==highest)highest_done=true;
+                    if(faults)throw std::runtime_error("fault "+std::to_string(i));
+                    return passes;
                 });
                 check(outcome.stop==stop,label+"stop index");
                 for(std::size_t i=0;i<jobs;++i) {
-                    if(i<=stop&&i<jobs)check(runs[i]==1,label+"every job up to the stop runs once");
+                    if(i<=stop)check(runs[i]==1,label+"every job up to the stop runs once");
                     else check(runs[i]<=1,label+"no job runs twice");
                 }
                 if(thrown<0)check(!outcome.error,label+"no exception");
@@ -131,8 +156,30 @@ namespace {
             run({},{30,50},30,30);
             run({0},{1},0,-1);
             run({},{63},63,63);
+            // A job above the stop sees superseded() turn true and gives up. Job 5 would otherwise
+            // spin for ten seconds; job 3 fails only once job 5 is running.
+            std::atomic<bool> started{false},released{false};
+            const auto begin=std::chrono::steady_clock::now();
+            const auto outcome=run_ordered(8,workers,[&](std::size_t i,const CancelCheck& superseded) {
+                if(i==3) {
+                    if(workers>1)await(started,std::chrono::milliseconds(2000));
+                    return false;
+                }
+                if(i==5) {
+                    started=true;
+                    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+                    while(!superseded())if(std::chrono::steady_clock::now()>deadline)return true;
+                    released=true;
+                    throw Cancelled {};
+                }
+                return true;
+            });
+            check(outcome.stop==3&&!outcome.error,label+"a cancelled job above the stop is discarded");
+            check(workers==1?!started:static_cast<bool>(released),label+"the job above the stop was released");
+            check(std::chrono::steady_clock::now()-begin<std::chrono::seconds(5),label+"cancellation ends the wait");
         }
-        check(run_ordered(0,8,[](std::size_t)->bool {throw std::logic_error("no job exists");}).stop==0,"empty run");
+        check(run_ordered(0,8,[](std::size_t,const CancelCheck&)->bool {throw std::logic_error("no job exists");}).stop==0,
+              "empty run");
     }
 }
 
@@ -204,6 +251,34 @@ int main(int argc,char** argv) {
             check(signs.method=="diagonal"&&signs.precision_bits==0&&same(signs.inertia,{1,1,0}),"diagonal pencil counts signs");
         }
 
+        // Cancellation: exact work throws Cancelled once its check turns true, here at the first
+        // poll and at the fifth. A check that never turns true changes nothing.
+        {
+            const Q near=spectrum[0]+Q(1,pow10(50));
+            auto cancelled_after=[](int polls) {
+                auto count=std::make_shared<int>(0);
+                return CancelCheck([count,polls] {
+                    return ++*count>polls;
+                });
+            };
+            auto throws=[&](auto action) {
+                try {
+                    action();
+                }
+                catch(const Cancelled&) {
+                    return true;
+                }
+                return false;
+            };
+            for(int polls: {0,4}) {
+                check(throws([&] {(void)shifted_inertia_report(p.F,p.E,near,cancelled_after(polls));}),"cancelled congruence throws");
+                check(throws([&] {(void)scheduled_inertia(shifted_matrix(p,spectrum[2]),{},cancelled_after(polls));}),
+                      "cancelled elimination throws");
+            }
+            check(same(shifted_inertia(p.F,p.E,near,[] {return false;}),expected_inertia(spectrum,near)),
+                  "an idle cancellation check changes nothing");
+        }
+
         ordered_runs();
 
         // Parallel inertia certification reproduces the serial rows and counters. Half ties at one
@@ -217,13 +292,15 @@ int main(int argc,char** argv) {
             options.polynomial_certification=false;
             const std::vector<Q> ties={Q(13,4),Q(9,4),Q(2),Q(5,4),Q(1,2),Q(1,4)};
             const auto tied=congruent_pencil(ties,generator);
-            const auto serial=inertia_solves_agree(tied.k,tied.m,options,"ties");
+            // Four ties cost two endpoint inertias and one midpoint inertia each, the two other
+            // roots two each, plus the two positive-definiteness checks.
+            const auto serial=inertia_solves_agree(tied.k,tied.m,options,"ties",{18,4,1});
             check(serial.polynomial_sign_evaluations>0,"ties evaluate midpoint signs");
             check(serial.roots[0].lower==Q(13,4)&&serial.roots[0].upper==Q(13,4)&&serial.roots[0].decimal=="3.3",
                   "a tie is an exact singleton");
             options.full_coefficient_check=false;
             options.polynomial_certification=true;
-            const auto unchecked=inertia_solves_agree(tied.k,tied.m,options,"unchecked ties");
+            const auto unchecked=inertia_solves_agree(tied.k,tied.m,options,"unchecked ties",{18,4,1});
             check(!unchecked.coefficient_identity_verified,"unchecked solve uses inertia");
             check(certificate_text(unchecked.roots,1)==certificate_text(serial.roots,1),"unchecked rows equal checked rows");
             options=Options {};
@@ -232,8 +309,13 @@ int main(int argc,char** argv) {
             options.polynomial_certification=false;
             const std::vector<Q> cluster={Q(3)+Q(1,pow10(20)),Q(3),Q(2),Q(3,2),Q(1),Q(1,2),Q(1,3),Q(1,4)};
             const auto clustered=congruent_pencil(cluster,generator);
-            const auto result=inertia_solves_agree(clustered.k,clustered.m,options,"cluster");
-            check(result.certification_attempts>1,"cluster fails an attempt before certifying");
+            // Serial counts of the PR #5 solver on these exact pencils. The cluster at the top stops
+            // its failed attempts at root 0; the one in the middle at root 3, after roots 0-2 pass
+            // and while roots 4-7 would pass too.
+            inertia_solves_agree(clustered.k,clustered.m,options,"cluster",{37,1,4});
+            const std::vector<Q> middle={Q(9),Q(8),Q(7),Q(3)+Q(1,pow10(20)),Q(3),Q(2),Q(1),Q(1,2)};
+            const auto centered=congruent_pencil(middle,generator);
+            inertia_solves_agree(centered.k,centered.m,options,"middle cluster",{54,0,4});
         }
 
         // The oil-rig pencil (n=66, dense K, diagonal M).
@@ -257,9 +339,8 @@ int main(int argc,char** argv) {
             check(same(shifted_inertia(oil.F,oil.E,first),inertia(shifted_matrix(oil,first))),"oil-rig congruence agrees with elimination");
             // Exact inertia gives the same rows and counters for every worker count.
             options.polynomial_certification=false;
-            const auto serial=inertia_solves_agree(k,m,options,"oil rig");
+            const auto serial=inertia_solves_agree(k,m,options,"oil rig",{2+2*66,0,1});
             check(certificate_text(serial.roots,50)==certificate_text(fast.roots,50),"inertia rows equal polynomial rows");
-            check(serial.inertia_evaluations==2+2*66,"oil rig needs two inertias per root");
             // A replay stops counting at the first failing row, whatever the worker count.
             const std::size_t r=20;
             const auto bad=displaced(fast.roots,r);

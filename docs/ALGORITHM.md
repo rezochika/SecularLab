@@ -307,8 +307,12 @@ every inertia therefore first tries a certificate whose integers stay short.
   nor changed. X = trunc(2^(P-8)*W^T) is an integer matrix, upper triangular with 2^(P-8) on its
   diagonal by construction. A zero floating pivot abandons the proposal, and so does an entry of
   W above 2^(P+b), where b is the bit length of the longest entry of A; that bounds the exact work.
+  One n-by-n floating array suffices: W^T overwrites the factored upper triangle, which is no
+  longer needed once L and the pivots are known.
 - Check, exact. X must be upper triangular with a nonzero diagonal, so det X != 0. B = X^T A X
-  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|.
+  is formed in integers, and every row must satisfy |b_ii| > sum_(j!=i) |b_ij|. B is formed one
+  row of its upper triangle at a time and not kept. That row completes the off-diagonal sum of
+  row i, since the entries b(k,i), k<i, came with earlier rows, so a failing row ends the check.
 
 When the check passes, B is symmetric and strictly diagonally dominant. B and every
 diag(B)+t(B-diag(B)), 0<=t<=1, are then nonsingular (Levy-Desplanques), so no eigenvalue crosses
@@ -333,7 +337,7 @@ n^3/6 integer products of entries near 2P+b bits.
   64-bit limbs, then 2P and 4P. At 50 places that is 320, 640 and 1280 bits. All 132 oil-rig
   endpoints and all 306 BCSSTK05 endpoints certify at 320 bits; an earlier measurement found
   only 74 of the 132 oil-rig endpoints at 192 bits, and all at 256. An oil-rig endpoint takes
-  about 9 ms instead of 0.62 s, a BCSSTK05 endpoint about 0.036 s instead of 6.8 s. An exact
+  about 8 ms instead of 0.62 s, a BCSSTK05 endpoint about 0.03 s instead of 6.8 s. An exact
   singleton endpoint is an eigenvalue, so qF-pE is singular: its proposals always fail, and
   elimination proves the nullity. A denominator longer than about 16300 bits leaves no precision
   in the schedule, and elimination decides directly.
@@ -362,10 +366,19 @@ for every worker count:
   and so does the memo that a later step of the same attempt reads.
 - An exception is rethrown after this counting, and only when it came from the stopping root. An
   exception from a root above a failure is dropped, since the serial loop never reaches that root.
+- A root that is already running when a lower one stops abandons its exact work. Elimination
+  polls once per pivot, the proposal once per factorization step and the dominance check once per
+  row, whether the run has stopped below that root; if so they throw, and the exception is
+  discarded with the rest of the root. The poll never fires for a root at or below the stop, so a
+  hand-edited certificate with a cheap wrong first row and huge later rows fails as fast as in
+  serial replay.
 
-The polynomial proof stays serial: its signs share one evaluator's scaled tables and memo, and
-its whole certification takes about 0.05 s on BCSSTK05. On the oil rig, `--certification inertia`
-now takes about 1.8 s with one worker and 0.3 s with eight, where elimination took 78 s.
+Each running root holds its own proposal and, when elimination decides, its own Bareiss matrix,
+so peak memory grows with the worker count; `--workers 1` bounds it to one root. The polynomial
+proof stays serial: its signs share one evaluator's scaled tables and memo, and its whole
+certification takes about 0.05 s on BCSSTK05. With eight workers `--certification inertia` now
+solves the oil rig in about 0.27 s instead of 78 s, and BCSSTK05 in about 2 s instead of 2024 s
+(1.7 s and 14 s with one worker).
 
 ## 5. Replay and failure reporting
 
