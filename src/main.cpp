@@ -12,16 +12,18 @@ using namespace secular;
 namespace fs=std::filesystem;
 namespace {
     void help() {
-        std::cout<<R"(SecularLab 1.0 - exact coefficients, Graeffe candidates, exact inertia certificates
+        std::cout<<R"(SecularLab 1.0 - exact coefficients, Graeffe candidates, exact root certificates
 
   secular solve --matrix K.mtx [--mass M.mtx] [--digits 50]
                 [--precision 256] [--max-precision 2048] [--max-squarings 128]
                 [--affine K1.mtx --parameter 1/3]
                 [--affine K1.mtx --legendre-degree 128 --argument 1/3]
+                [--workers 0..64] [--certification auto|inertia]
                 [--no-coefficient-check] [--out results/new-run]
   secular coefficients --matrix K.mtx [--mass M.mtx] [--affine K1.mtx]
-                       [--out results/new-coefficients]
+                       [--workers 0..64] [--out results/new-coefficients]
   secular verify --matrix K.mtx [--mass M.mtx] --cert eigenvalues.tsv
+                 [--workers 0..64] [--certification auto|inertia] [--out results/replay]
 
 Matrix Market real/integer coordinate or array files; exact decimal/scientific
 and rational tokens supported. Omitted mass is identity. Affine input means
@@ -30,8 +32,12 @@ construction. Coefficients mode without --parameter retains formal t.
 
 Root solving currently requires symmetric positive definite K and M, and a simple
 spectrum. Coefficients mode only requires nonsingular M. Candidate arithmetic is
-NOT a certificate. Successful eigenvalues are certified by exact inertia of the
-original pencil and exact half-away-from-zero decimal rounding.
+NOT a certificate. Auto certification uses an exactly verified characteristic
+polynomial and a complete disjoint root proof, with exact inertia fallback.
+Inertia mode checks the original pencil directly. Decimal rounding is exact
+half-away-from-zero. Auto verify derives its polynomial from the input matrices.
+Workers 0 means automatic (at most 8); explicit 1..64 is clamped to oracle jobs.
+--no-coefficient-check forces solve to use inertia and is forbidden for verify.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum
 or invalid certificate; exit 2: invalid input, resource or I/O error.
@@ -68,7 +74,7 @@ int main(int argc,char** argv) {
         std::string mode=argv[1];
         if(mode!="solve"&&mode!="coefficients"&&mode!="verify")throw std::invalid_argument("unknown command: "+mode);
         const std::set<std::string> valued= {
-            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert"
+            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert","--workers","--certification"
         };
         std::map<std::string,std::string> args;
         bool check=true;
@@ -87,6 +93,21 @@ int main(int argc,char** argv) {
             args[a]=argv[++i];
         }
         if(!args.count("--matrix"))throw std::invalid_argument("--matrix is required");
+        Options o;
+        o.full_coefficient_check=check;
+        if(args.count("--workers"))o.oracle_workers=number(args.at("--workers"),64);
+        if(args.count("--certification")) {
+            const auto& method=args.at("--certification");
+            if(method!="auto"&&method!="inertia")throw std::invalid_argument("--certification must be auto or inertia");
+            if(mode=="coefficients")throw std::invalid_argument("--certification requires solve or verify");
+            o.polynomial_certification=method=="auto";
+        }
+        if(mode=="verify"&&!check)throw std::invalid_argument("--no-coefficient-check is not allowed for verify");
+        if(args.count("--digits"))o.digits=number(args.at("--digits"),1000);
+        if(args.count("--precision"))o.precision=number(args.at("--precision"),20000);
+        if(args.count("--max-precision"))o.max_precision=number(args.at("--max-precision"),20000);
+        if(args.count("--max-squarings"))o.max_squarings=number(args.at("--max-squarings"),512);
+        if(mode=="solve")validate_options(o);
         auto k=read_matrix_market(fs::path(args.at("--matrix")));
         auto m=args.count("--mass")?read_matrix_market(fs::path(args.at("--mass"))):identity<Q>(k.n);
         if(m.n!=k.n)throw std::invalid_argument("mass dimension differs");
@@ -109,17 +130,17 @@ int main(int argc,char** argv) {
             if(!in)throw std::runtime_error("cannot open certificate file");
             unsigned digits;
             auto roots=read_certificates(in,digits);
-            bool pass=verify_root_certificates(k,m,roots,digits);
-            std::cout<<(pass?"VERIFIED":"FAILED")<<" "<<roots.size()<<" eigenvalue certificates, "<<digits<<" decimal places\n";
-            return pass?0:1;
+            if(args.count("--out"))init_output(fs::path(args.at("--out")));
+            auto result=verify_certificates(k,m,roots,digits,o);
+            if(args.count("--out")) {
+                auto f=output(fs::path(args.at("--out"))/"result.json");
+                write_result_json(f,result,digits);
+                f.close();
+            }
+            std::cout<<(result.certified?"VERIFIED":"FAILED")<<" "<<roots.size()<<" eigenvalue certificates, "<<digits<<" decimal places"
+                     <<" certification_method="<<result.certification_method<<" total_seconds="<<std::setprecision(6)<<result.total_seconds<<'\n';
+            return result.certified?0:1;
         }
-        Options o;
-        o.full_coefficient_check=check;
-        if(args.count("--digits"))o.digits=number(args.at("--digits"),1000);
-        if(args.count("--precision"))o.precision=number(args.at("--precision"),20000);
-        if(args.count("--max-precision"))o.max_precision=number(args.at("--max-precision"),20000);
-        if(args.count("--max-squarings"))o.max_squarings=number(args.at("--max-squarings"),512);
-        if(mode=="solve") validate_options(o);
         const fs::path dir=args.count("--out")?args.at("--out"):"results/new-run";
         init_output(dir);
         {
@@ -161,7 +182,7 @@ int main(int argc,char** argv) {
                             std::reverse(row.begin(),row.end());
                             specialized.push_back(evaluate(row,value));
                         }
-                        if(!verify_coefficients(e,f,specialized))throw std::logic_error("affine determinant-grid identity failed");
+                        if(!verify_coefficients(e,f,specialized,o.oracle_workers))throw std::logic_error("affine determinant-grid identity failed");
                     }
                 }
                 auto f=output(dir/"coefficients_affine.tsv");
@@ -176,7 +197,7 @@ int main(int argc,char** argv) {
             }
             auto p=integer_pencil(k,m);
             auto co=characteristic(p.E,p.F);
-            bool verified=check&&verify_coefficients(p.E,p.F,co.coefficients);
+            bool verified=check&&verify_coefficients(p.E,p.F,co.coefficients,o.oracle_workers);
             if(check&&!verified)throw std::logic_error("coefficient identity failed");
             coefficients_file(dir/"coefficients.tsv",co.coefficients,p.scale);
             std::cout<<"EXACT_COEFFICIENTS order="<<k.n<<" determinant_identity_verified="<<(verified?"yes":"no")<<'\n';
@@ -198,7 +219,7 @@ int main(int argc,char** argv) {
             f.close();
             for(const auto& r:result.roots)std::cout<<"lambda["<<r.index<<"] = "<<r.decimal<<'\n';
         }
-        std::cout<<result.status<<" order="<<result.order<<" roots="<<result.roots.size()<<" digits="<<o.digits<<" squarings="<<result.graeffe_steps<<" work_digits="<<result.working_digits<<" total_seconds="<<std::setprecision(6)<<result.total_seconds<<'\n';
+        std::cout<<result.status<<" order="<<result.order<<" roots="<<result.roots.size()<<" digits="<<o.digits<<" squarings="<<result.graeffe_steps<<" work_digits="<<result.working_digits<<" certification_method="<<result.certification_method<<" total_seconds="<<std::setprecision(6)<<result.total_seconds<<'\n';
         return result.certified?0:1;
     }
     catch(const std::exception& ex) {

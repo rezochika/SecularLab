@@ -77,6 +77,16 @@ namespace secular {
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1);
     Z evaluate(const std::vector<Z>& coefficients,const Z& x);
     Q evaluate(const std::vector<Z>& coefficients,const Q& x);
-    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& coefficients);
+    // Exact sign at a rational point, using only integer arithmetic.
+    int polynomial_sign(const std::vector<Z>& coefficients,const Q& x);
+    struct SquarefreeResult {
+        bool repeated=false;
+        // Nonzero only for a degree-preserving modular squarefree proof.
+        unsigned long modular_prime=0;
+    };
+    SquarefreeResult check_squarefree(const std::vector<Z>& coefficients);
+    // 0 selects hardware concurrency, capped at eight; explicit counts are 1..64.
+    unsigned oracle_worker_count(unsigned requested,std::size_t jobs);
+    bool verify_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& coefficients,unsigned workers=1);
     bool has_repeated_roots(const std::vector<Z>& coefficients);
 }
