@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <system_error>
 #include <thread>
 
 namespace secular {
@@ -916,7 +917,8 @@ namespace secular {
     }
     std::optional<Inertia> congruence_inertia(const ZMatrix& a,unsigned precision_bits) {
         if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
-        if(precision_bits<16||precision_bits>4096)throw std::invalid_argument("congruence precision must be 16..4096 bits");
+        if(precision_bits<16||precision_bits>max_congruence_precision)
+            throw std::invalid_argument("congruence precision must be 16.."+std::to_string(max_congruence_precision)+" bits");
         const auto n=a.n;
         // Untrusted proposal: an LDL^T of a without pivoting, in floating point whose precision
         // is set on every object; the process-global default precision is never read or changed.
@@ -978,22 +980,30 @@ namespace secular {
         }
         return certify_congruence(a,x);
     }
-    DefinitenessReport check_positive_definite(const ZMatrix& a) {
+    InertiaReport scheduled_inertia(const ZMatrix& a,const std::vector<unsigned>& precisions) {
         if(!symmetric(a))throw std::invalid_argument("inertia requires symmetric matrix");
-        DefinitenessReport report;
+        InertiaReport report;
         if(diagonal(a)) {
             report.method="diagonal";
-            report.positive_definite=inertia(a).positive==a.n;
+            report.inertia=inertia(a);
             return report;
         }
-        for(unsigned precision: {64u,128u,256u})if(const auto in=congruence_inertia(a,precision)) {
+        for(unsigned precision:precisions)if(const auto in=congruence_inertia(a,precision)) {
             report.method="congruence";
             report.precision_bits=precision;
-            report.positive_definite=in->positive==a.n;
+            report.inertia=*in;
             return report;
         }
         report.method="elimination";
-        report.positive_definite=inertia(a).positive==a.n;
+        report.inertia=inertia(a);
+        return report;
+    }
+    DefinitenessReport check_positive_definite(const ZMatrix& a) {
+        const auto decided=scheduled_inertia(a,{64u,128u,256u});
+        DefinitenessReport report;
+        report.positive_definite=decided.inertia.positive==a.n;
+        report.method=decided.method;
+        report.precision_bits=decided.precision_bits;
         return report;
     }
     IntegerPencil integer_pencil(const QMatrix& k,const QMatrix& m) {
@@ -1011,11 +1021,22 @@ namespace secular {
         }
         return p;
     }
-    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& s) {
-        if(f.n!=e.n)throw std::invalid_argument("pencil dimensions differ");
+    std::vector<unsigned> shifted_precisions(const Q& s) {
+        std::vector<unsigned> out;
+        // A canonical denominator is positive, so bits() is at least one.
+        const std::size_t first=(64+bits(s.get_den())+63)/64*64;
+        for(std::size_t precision=first;precision<=max_congruence_precision&&out.size()<3;precision*=2)
+            out.push_back(static_cast<unsigned>(precision));
+        return out;
+    }
+    InertiaReport shifted_inertia_report(const ZMatrix& f,const ZMatrix& e,const Q& s) {
+        if(f.n!=e.n||f.data.size()!=e.data.size())throw std::invalid_argument("pencil dimensions differ");
         ZMatrix a(f.n);
         for(std::size_t i=0;i<f.data.size();++i)a.data[i]=s.get_den()*f.data[i]-s.get_num()*e.data[i];
-        return inertia(a);
+        return scheduled_inertia(a,shifted_precisions(s));
+    }
+    Inertia shifted_inertia(const ZMatrix& f,const ZMatrix& e,const Q& s) {
+        return shifted_inertia_report(f,e,s).inertia;
     }
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned requested) {
         if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
@@ -1310,6 +1331,47 @@ namespace secular {
         unsigned workers=requested;
         if(workers==0)workers=std::min(8u,std::max(1u,std::thread::hardware_concurrency()));
         return static_cast<unsigned>(std::min<std::size_t>(workers,jobs));
+    }
+    OrderedRun run_ordered(std::size_t jobs,unsigned workers,const std::function<bool(std::size_t)>& job) {
+        std::vector<std::exception_ptr> errors(jobs);
+        std::atomic<std::size_t> next{0},stop{jobs};
+        // Indices are handed out in increasing order. Once one exceeds the lowest stop seen so far,
+        // so does every later one, and every index below the final stop has been handed out and
+        // run; the lowest stop is thus the serial one, whatever the timing.
+        auto drain=[&] {
+            for(;;) {
+                const auto i=next.fetch_add(1);
+                if(i>=jobs||i>stop.load())return;
+                bool passed=false;
+                try {
+                    passed=job(i);
+                }
+                catch(...) {
+                    errors[i]=std::current_exception();
+                }
+                if(!passed)for(auto lowest=stop.load();i<lowest&&!stop.compare_exchange_weak(lowest,i);) {}
+            }
+        };
+        {
+            // jthread destruction joins every helper before the shared state goes away. A helper
+            // that cannot be created only leaves more of the work to the others and the caller.
+            std::vector<std::jthread> helpers;
+            const auto threads=std::min<std::size_t>(workers,jobs);
+            helpers.reserve(threads);
+            for(std::size_t w=1;w<threads;++w) {
+                try {
+                    helpers.emplace_back(drain);
+                }
+                catch(const std::system_error&) {
+                    break;
+                }
+            }
+            drain();
+        }
+        OrderedRun out;
+        out.stop=stop.load();
+        if(out.stop<jobs)out.error=errors[out.stop];
+        return out;
     }
     OracleReport check_coefficients(const ZMatrix& e,const ZMatrix& f,const std::vector<Z>& c,unsigned requested,CoefficientOracle oracle) {
         // Validate before scheduling; public Matrix fields may have been edited.
