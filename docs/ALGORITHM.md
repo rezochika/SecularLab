@@ -120,18 +120,38 @@ with indices outside 0,...,n omitted. It represents g(z^2)=(-1)^n f(z)f(-z).
 The roots of g are the squares of the roots of f. After r steps, successive coefficient
 ratios yield approximate roots
 
-    exp((log|a_k^(r)| - log|a_(k-1)^(r)|)/2^r).
+    |a_k^(r) / a_(k-1)^(r)|^(1/2^r).
 
 The positive, distinct spectrum assumption makes this a candidate-generation strategy for
 all roots in decreasing order. The program never uses a numerical reference eigensolver,
 a bisection eigensolver or Newton polishing to replace this stage.
 
-To prevent the enormous exponent growth of literal repeated squaring, each coefficient
-is represented by its sign and logarithmic magnitude. Signed additions implement the same
-paired recurrence, with leading-log normalization. Very small relative terms may be
-ignored in this *untrusted* arithmetic. Loss of the positive-root coefficient sign pattern
-triggers a higher-precision restart. The logarithms/exponentials use Boost's GMP float
-backend; they are not interval enclosures or a correctly-rounded special-function promise.
+Literal repeated squaring makes the coefficients' exponents grow like 2^r. Each coefficient
+is therefore stored in extended-exponent form m*2^e. The mantissa m is a signed GMP float at
+the working precision with 1/2 <= |m| < 1, and e is an exact integer. The pass starts from the
+exact coefficients (`mpf_set_z`, then normalization) and divides out a_0's power of two. For
+each b_k, every term of the paired sum (the diagonal a_k^2 and each 2 a_j a_(2k-j)) gets an
+exact exponent. The terms are aligned to the largest of these exponents, so a term costs one
+mantissa product, a binary shift and an addition. The sum is then normalized. No logarithm or
+exponential is evaluated.
+
+Terms more than cut bits below the largest term of their sum are ignored in this *untrusted*
+arithmetic. Here cut is the bit length of 10^(work+10), the same 10^-(work+10) relative cutoff
+the earlier signed-logarithm form used. Loss of the positive-root coefficient sign pattern,
+including exact cancellation to zero, triggers a higher-precision restart.
+
+Exponents start as checked 64-bit integers. They can outgrow that range after about 50
+squarings, for example near 54 for roots around 1e-100. The first overflow converts the
+iterate exactly to unbounded GMP integers for the rest of the pass. The integer exponents are
+the same either way, so the candidates do not depend on where the switch happens, and no step
+falls back to logarithmic magnitudes. `graeffe_unbounded_exponents` in `result.json` reports
+the switch for the final pass.
+
+A candidate is recovered without transcendental functions. For q = |m_k/m_(k-1)| and
+d = e_k - e_(k-1), normalized so that 1/2 <= q < 1, each of r rounds makes d even (doubling q
+if needed), takes the square root of q and halves d. The result is q*2^d. Each square root
+halves the relative error carried by q. All of this uses GMP floats through Boost's GMP
+backend; it is not an interval enclosure or a correctly-rounded promise.
 
 Candidates are considered for exact certification after every second squaring once successive
 values are numerically stable to the heuristic absolute threshold 10^-(digits+16), and also
@@ -153,8 +173,8 @@ is exactly the number of generalized eigenvalues greater than s.
 
 The fast inertia routine uses fraction-free symmetric elimination. A diagonal matrix needs no
 elimination: its eigenvalues are its diagonal entries, so their signs are counted directly.
-Symmetric row/column permutations are congruences and do not alter inertia. At each step the sign of the LDL
-pivot equals sign(current Bareiss pivot / previous Bareiss pivot).
+Symmetric row/column permutations are congruences and do not alter inertia. At each step the
+sign of the LDL pivot equals sign(current Bareiss pivot / previous Bareiss pivot).
 
 When all active diagonal entries are zero but an off-diagonal remains, the program falls
 back to exact rational block elimination. A block [[0,b],[b,0]], b!=0, contributes one
@@ -165,8 +185,15 @@ sign or floating-point Cholesky decision enters this certificate.
 For candidate k (0 is largest), construct exact rational endpoints ell,u around its rounded
 center. Proposal widths depend on the requested decimal places, candidate magnitude, nearest
 candidate gap and working precision. This lets very small or closely spaced roots have
-distinct intervals even when their printed decimals are identical. Each candidate gets at
-most three increasingly narrow proposals, capped by a heuristic working-precision allowance
+distinct intervals even when their printed decimals are identical. The magnitude and the gap
+enter only through their nearest powers of ten: the e with 10^(e-1/2) <= x < 10^(e+1/2),
+decided by the exact test 10^(2e-1) <= x^2 < 10^(2e+1). That depends on the value alone, not on
+the dyadic form of a converted floating candidate. Its boundaries are irrational, so candidate
+noise can move it only next to some sqrt(10)*10^k. The certificates are therefore normally
+identical for every working precision and candidate arithmetic that certifies. An earlier
+estimate counted the decimal digits of the candidate's numerator and denominator, and varied by
+one with the candidate's lowest set bit. Each candidate gets at most three increasingly narrow
+proposals, capped by a heuristic working-precision allowance
 that retains the original output-driven widths (so exact candidates can certify beyond their
 working precision), and by the decimal-scale resource limit. These heuristics only propose intervals; none relaxes
 the exact acceptance conditions. A nonsingular endpoint pair must satisfy
@@ -265,8 +292,11 @@ over the workers. The modular oracle needs O(n^3) word operations per prime, plu
 every entry and coefficient to form residues. The number of primes is about the bound's bit
 length divided by 61. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
-Each Graeffe pass costs O(n^2) high-precision signed-log operations. Exact inertia is O(n^3)
-arithmetic per endpoint, normally two endpoints for each root, and may dominate total time.
+Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
+shift and addition per term that is not negligible. Recovering the candidates after r
+squarings costs r square roots per root. Exact inertia is O(n^3) arithmetic per endpoint,
+normally two endpoints for each root, and may dominate total time. A polynomial sign costs one
+Horner pass of integer products, which a shared scaled table keeps short.
 
 The result timings separate coefficients, coefficient oracle, Graeffe and certification. Total
 also includes validation, denominator clearing and squarefree checking, so the named phase

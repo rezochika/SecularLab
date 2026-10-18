@@ -48,7 +48,8 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         assert result['oracle_workers']==min(workers,result['oracle_moduli']) and result['recurrence_workers']==min(workers,3)
         assert result['inertia_evaluations']==2 # mandatory K/M SPD guards only
         assert result['times_seconds']['initialization']>=0 and result['times_seconds']['squarefree']>=0
-        checks+=5
+        assert result['graeffe_unbounded_exponents'] is False # 64-bit binary exponents sufficed
+        checks+=6
         run(['coefficients','--matrix',matrix/'spd3.mtx','--workers',workers,'--out',d/('coeff'+str(workers))])
     for artifact in ('coefficients.tsv','eigenvalues.tsv'):
         assert (d/'workers1'/artifact).read_bytes()==(d/'workers4'/artifact).read_bytes(); checks+=1
@@ -137,6 +138,14 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         result=json.loads((out/'result.json').read_text())
         assert result['certified'] and result['coefficient_identity_verified']; checks+=1
         run(['verify','--matrix',out/'input_K.mtx','--mass',out/'input_M.mtx','--cert',out/'eigenvalues.tsv'])
+    # Proposal widths see candidates only through their nearest powers of ten, so every
+    # working precision that certifies gives byte-identical intervals.
+    stable=set()
+    for precision in ('64','256','1024'):
+        out=d/('spring20_work'+precision)
+        run(['solve','--matrix',matrix/'spring20.mtx','--digits','1','--precision',precision,'--max-precision',precision,'--out',out])
+        stable.add((out/'eigenvalues.tsv').read_bytes())
+    assert len(stable)==1, 'spring20 certificate endpoints changed with working precision'; checks+=1
     run(['solve','--matrix',matrix/'dense_stiffness3.mtx','--mass',matrix/'dense_mass3.mtx','--digits','50','--out',d/'dense'])
     checks+=check_dense_known_spectrum(d/'dense/eigenvalues.tsv')
     run(['verify','--matrix',d/'dense/input_K.mtx','--mass',d/'dense/input_M.mtx','--cert',d/'dense/eigenvalues.tsv'])

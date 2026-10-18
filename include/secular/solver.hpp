@@ -32,6 +32,8 @@ namespace secular {
         // det(zE-F)=scale^n det(zM-K)
         std::size_t order {},exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
         unsigned working_digits {},graeffe_steps {},attempts {};
+        // The final Graeffe pass outgrew 64-bit binary exponents and continued with unbounded ones.
+        bool graeffe_unbounded_exponents=false;
         bool coefficient_identity_verified=false;
         double initialization_seconds=0,squarefree_seconds=0;
         unsigned oracle_workers=0,recurrence_workers=0;
@@ -44,6 +46,19 @@ namespace secular {
         std::size_t polynomial_sign_evaluations=0,inertia_evaluations=0;
         double coefficients_seconds {},oracle_seconds {},graeffe_seconds {},certification_seconds {},total_seconds {};
     };
+    struct GraeffeCandidates {
+        // Exact values of the floating candidates, largest first.
+        std::vector<Q> roots;
+        // The pass outgrew its narrow binary exponents and continued with unbounded ones.
+        bool unbounded_exponents=false;
+    };
+    // The UNTRUSTED candidate stage alone, for tests and diagnostics: `squarings` root-squaring
+    // steps of descending coefficients with the positive-root sign pattern, at `work` decimal
+    // digits. It sets the process-global floating default precision, as solve does, and throws
+    // std::runtime_error when the pass loses the sign pattern. narrow_exponent_bits below 63
+    // only moves the switch to unbounded exponents earlier; the candidates never depend on it.
+    GraeffeCandidates graeffe_candidates(const std::vector<Z>& coefficients,unsigned work,unsigned squarings,
+                                         unsigned narrow_exponent_bits=63);
     void validate_options(const Options& options);
     SolveResult solve(const QMatrix& stiffness,const QMatrix& mass,const Options& options);
     SolveResult verify_certificates(const QMatrix& stiffness,const QMatrix& mass,

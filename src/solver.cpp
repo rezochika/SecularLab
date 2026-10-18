@@ -2,6 +2,7 @@
 #include <boost/multiprecision/gmp.hpp>
 #include <chrono>
 #include <algorithm>
+#include <cstdint>
 #include <iomanip>
 #include <map>
 #include <sstream>
@@ -15,10 +16,6 @@ namespace secular {
         double elapsed(Clock::time_point a) {
             return std::chrono::duration<double>(Clock::now()-a).count();
         }
-        struct SignedLog {
-            int sign=0;
-            Real value=0;
-        };
         struct PrecisionLoss:std::runtime_error {
             using std::runtime_error::runtime_error;
         };
@@ -30,68 +27,267 @@ namespace secular {
         Q qabs(Q q) {
             return q<0?-q:q;
         }
-        SignedLog plus(const SignedLog& x,const SignedLog& y,const Real& cutoff) {
-            if(x.sign==0)return y;
-            if(y.sign==0)return x;
-            const auto* hi=&x;
-            const auto* lo=&y;
-            if(x.value<y.value)std::swap(hi,lo);
-            Real diff=lo->value-hi->value;
-            // Only the UNTRUSTED candidate stage drops negligible terms. Acceptance
-            // later proves the complete rootset with verified exact coefficients
-            // or recomputes exact inertia of the original rational pencil.
-            if(diff<cutoff)return *hi;
-            Real t=exp(diff);
-            if(hi->sign==lo->sign)return {
-                hi->sign,Real(hi->value+log(Real(1)+t))
-            };
-            if(diff==0)return {};
-            Real remainder=Real(1)-t;
-            if(remainder<=0)throw PrecisionLoss("cancellation exhausted Graeffe working precision");
-            return {
-                hi->sign,Real(hi->value+log(remainder))
-            };
+        // Graeffe candidates in extended-exponent form (UNTRUSTED stage). A coefficient is
+        // m*2^e: a working-precision mantissa with 1/2<=|m|<1 and an exact integer exponent, so
+        // squaring needs no logarithms or exponentials. Exponents start as checked int64 values.
+        // The first overflow converts the iterate to unbounded GMP integers for the rest of the
+        // pass, so every value is the one unbounded exponents give, wherever the switch happens.
+        struct ExponentOverflow {};
+        using Narrow=std::int64_t;
+        // Narrow exponents stay within [-limit,limit]; a result outside it throws instead.
+        struct NarrowExponents {
+            Narrow limit;
+            void sum(Narrow& r,Narrow a,Narrow b)const {
+                if((b>0&&a>limit-b)||(b<0&&a< -limit-b))throw ExponentOverflow {};
+                r=a+b;
+            }
+            void difference(Narrow& r,Narrow a,Narrow b)const {
+                if((b<0&&a>limit+b)||(b>0&&a< -limit+b))throw ExponentOverflow {};
+                r=a-b;
+            }
+            void add(Narrow& r,long v)const {
+                sum(r,r,v);
+            }
+            // The alignment shift if it is at most cut, else -1: the term is negligible.
+            long shift(Narrow v,long cut)const {
+                return v>cut?-1:static_cast<long>(v);
+            }
+            bool odd(Narrow v)const {
+                return v&1;
+            }
+            void halve_even(Narrow& v)const {
+                v/=2;
+            }
+            long small(Narrow v)const {
+                if(v>std::numeric_limits<long>::max()||v<std::numeric_limits<long>::min())throw ExponentOverflow {};
+                return static_cast<long>(v);
+            }
+        };
+        struct WideExponents {
+            void sum(Z& r,const Z& a,const Z& b)const {
+                mpz_add(r.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+            }
+            void difference(Z& r,const Z& a,const Z& b)const {
+                mpz_sub(r.get_mpz_t(),a.get_mpz_t(),b.get_mpz_t());
+            }
+            void add(Z& r,long v)const {
+                if(v>=0)mpz_add_ui(r.get_mpz_t(),r.get_mpz_t(),static_cast<unsigned long>(v));
+                else mpz_sub_ui(r.get_mpz_t(),r.get_mpz_t(),0UL-static_cast<unsigned long>(v));
+            }
+            long shift(const Z& v,long cut)const {
+                return mpz_cmp_si(v.get_mpz_t(),cut)>0?-1:mpz_get_si(v.get_mpz_t());
+            }
+            bool odd(const Z& v)const {
+                return mpz_odd_p(v.get_mpz_t());
+            }
+            void halve_even(Z& v)const {
+                mpz_tdiv_q_2exp(v.get_mpz_t(),v.get_mpz_t(),1);
+            }
+            long small(const Z& v)const {
+                if(!mpz_fits_slong_p(v.get_mpz_t()))throw PrecisionLoss("Graeffe candidate exceeds the floating exponent range");
+                return mpz_get_si(v.get_mpz_t());
+            }
+        };
+        Z widen(Narrow v) {
+            const std::uint64_t magnitude=v<0?0-static_cast<std::uint64_t>(v):static_cast<std::uint64_t>(v);
+            Z z;
+            mpz_import(z.get_mpz_t(),1,-1,sizeof magnitude,0,0,&magnitude);
+            if(v<0)mpz_neg(z.get_mpz_t(),z.get_mpz_t());
+            return z;
         }
-        std::vector<SignedLog> square_roots(const std::vector<SignedLog>& a,const Real& cutoff) {
-            const std::size_t n=a.size()-1;
-            std::vector<SignedLog> b(n+1);
-            Real ln2=log(Real(2));
-            for(std::size_t k=0;k<=n;++k) {
-                SignedLog sum {
-                    (k%2)?-1:1,Real(2*a[k].value)
-                };
-                std::size_t start=2*k>n?2*k-n:0;
-                // Paired terms of (-1)^n f(z)f(-z), equation (77) of OPM.
-                for(std::size_t j=start;j<k;++j) {
-                    auto h=2*k-j;
-                    SignedLog term {
-                        ((j%2)?-1:1)*a[j].sign*a[h].sign,Real(a[j].value+a[h].value+ln2)
-                    };
-                    sum=plus(sum,term,cutoff);
+        // Scales x into 1/2<=|x|<1 and returns the binary exponent removed (0 for x=0).
+        long normalize(mpf_t x) {
+            if(mpf_sgn(x)==0)return 0;
+            long ex=0;
+            mpf_get_d_2exp(&ex,x);
+            if(ex>0)mpf_div_2exp(x,x,static_cast<mp_bitcnt_t>(ex));
+            else if(ex<0)mpf_mul_2exp(x,x,static_cast<mp_bitcnt_t>(-ex));
+            return ex;
+        }
+        void scale_2exp(mpf_t x,long e) {
+            if(e>0)mpf_mul_2exp(x,x,static_cast<mp_bitcnt_t>(e));
+            else if(e<0)mpf_div_2exp(x,x,static_cast<mp_bitcnt_t>(-e));
+        }
+        template<class Exponent> struct Iterate {
+            std::vector<Real> mantissa;
+            std::vector<Exponent> exponent;
+        };
+        class Graeffe {
+        public:
+            // Mantissas take Boost's current default precision; cut is the drop threshold in bits.
+            // Narrow exponents have at most narrow_bits magnitude bits (63 fills an int64).
+            Graeffe(const std::vector<Z>& coefficients,long cut_bits,unsigned narrow_bits=63)
+                :cut(cut_bits),narrow_ops {narrow_bits>=63?std::numeric_limits<Narrow>::max():(Narrow(1)<<narrow_bits)-1} {
+                const auto size=coefficients.size();
+                for(auto* x: {&narrow,&narrow_next}) {
+                    x->mantissa.resize(size);
+                    x->exponent.resize(size);
                 }
-                const int expected=(k%2)?-1:1;
-                if(sum.sign!=expected)throw PrecisionLoss("Graeffe coefficient lost the positive-root sign pattern");
-                b[k]=std::move(sum);
+                terms.resize(size);
+                for(std::size_t i=0;i<size;++i)
+                    if(mpz_sgn(coefficients[i].get_mpz_t())!=((i%2)?-1:1))
+                        throw std::logic_error("exact positive-root coefficient sign invariant failed");
+                try {
+                    initialize(narrow,coefficients,narrow_ops);
+                }
+                catch(const ExponentOverflow&) {
+                    // Only a deliberately small narrow limit overflows on the input itself.
+                    widen_iterate(false);
+                    initialize(broad,coefficients,wide_ops);
+                }
             }
-            Real shift=b[0].value;
-            for(auto& c:b)c.value-=shift;
-            return b;
-        }
-        std::vector<Real> recover(const std::vector<SignedLog>& a,unsigned steps) {
-            std::vector<Real> roots;
-            roots.reserve(a.size()-1);
-            for(std::size_t i=1;i<a.size();++i) {
-                Real v=a[i].value-a[i-1].value;
-                mpf_div_2exp(v.backend().data(),v.backend().data(),steps);
-                roots.emplace_back(exp(v));
+            bool wide_exponents()const {
+                return wide;
             }
-            return roots;
+            void square() {
+                if(!wide) {
+                    try {
+                        step(narrow,narrow_next,terms,narrow_scratch,narrow_ops);
+                        std::swap(narrow,narrow_next);
+                        return;
+                    }
+                    catch(const ExponentOverflow&) {
+                        widen_iterate(true);
+                    }
+                }
+                step(broad,broad_next,wide_terms,wide_scratch,wide_ops);
+                std::swap(broad,broad_next);
+            }
+            // root_i = |a_i/a_(i-1)|^(1/2^steps), largest first, by repeated square roots.
+            std::vector<Real> roots(unsigned steps) {
+                if(!wide) {
+                    try {
+                        return recover(narrow,steps,narrow_scratch,narrow_ops);
+                    }
+                    catch(const ExponentOverflow&) {
+                        widen_iterate(true);
+                    }
+                }
+                return recover(broad,steps,wide_scratch,wide_ops);
+            }
+        private:
+            template<class Exponent,class Ops> void initialize(Iterate<Exponent>& a,const std::vector<Z>& c,const Ops& ops) {
+                for(std::size_t i=0;i<c.size();++i) {
+                    auto* m=a.mantissa[i].backend().data();
+                    mpf_set_z(m,c[i].get_mpz_t());
+                    a.exponent[i]=0;
+                    ops.add(a.exponent[i],normalize(m));
+                }
+                const Exponent lead=a.exponent[0];
+                for(auto& e:a.exponent)ops.difference(e,e,lead);
+            }
+            void widen_iterate(bool copy) {
+                for(auto* x: {&broad,&broad_next}) {
+                    x->mantissa.resize(narrow.mantissa.size());
+                    x->exponent.resize(narrow.exponent.size());
+                }
+                wide_terms.resize(terms.size());
+                if(copy)for(std::size_t i=0;i<narrow.mantissa.size();++i) {
+                    mpf_set(broad.mantissa[i].backend().data(),narrow.mantissa[i].backend().data());
+                    broad.exponent[i]=widen(narrow.exponent[i]);
+                }
+                wide=true;
+            }
+            // b_k = (-1)^k a_k^2 + 2 sum_{j<k} (-1)^j a_j a_(2k-j), equation 77 of OPM. Every term
+            // is aligned to the largest term exponent of its sum, and terms more than cut bits
+            // below it are dropped, which only the untrusted candidate stage may do.
+            template<class Exponent,class Ops> void step(const Iterate<Exponent>& a,Iterate<Exponent>& b,
+                                                         std::vector<Exponent>& term,Exponent& shift,const Ops& ops) {
+                const std::size_t n=a.mantissa.size()-1;
+                auto* sum=accumulator.backend().data();
+                auto* t=product.backend().data();
+                for(std::size_t k=0;k<=n;++k) {
+                    const std::size_t start=2*k>n?2*k-n:0;
+                    // term[k] holds the diagonal exponent, term[j] that of 2 a_j a_(2k-j).
+                    ops.sum(term[k],a.exponent[k],a.exponent[k]);
+                    std::size_t top=k;
+                    for(std::size_t j=start;j<k;++j) {
+                        ops.sum(term[j],a.exponent[j],a.exponent[2*k-j]);
+                        ops.add(term[j],1);
+                        if(term[j]>term[top])top=j;
+                    }
+                    const Exponent& reference=term[top];
+                    mpf_set_ui(sum,0);
+                    for(std::size_t j=start;j<=k;++j) {
+                        ops.difference(shift,reference,term[j]);
+                        const long s=ops.shift(shift,cut);
+                        if(s<0)continue;
+                        const auto h=2*k-j;
+                        mpf_mul(t,a.mantissa[j].backend().data(),a.mantissa[h].backend().data());
+                        mpf_div_2exp(t,t,static_cast<mp_bitcnt_t>(s));
+                        if(j%2)mpf_sub(sum,sum,t);
+                        else mpf_add(sum,sum,t);
+                    }
+                    if(mpf_sgn(sum)!=((k%2)?-1:1))throw PrecisionLoss("Graeffe coefficient lost the positive-root sign pattern");
+                    auto* m=b.mantissa[k].backend().data();
+                    mpf_set(m,sum);
+                    b.exponent[k]=reference;
+                    ops.add(b.exponent[k],normalize(m));
+                }
+                for(std::size_t k=n+1;k-->0;)ops.difference(b.exponent[k],b.exponent[k],b.exponent[0]);
+            }
+            template<class Exponent,class Ops> std::vector<Real> recover(const Iterate<Exponent>& a,unsigned steps,
+                                                                         Exponent& d,const Ops& ops) {
+                std::vector<Real> out(a.mantissa.size()-1);
+                for(std::size_t i=1;i<a.mantissa.size();++i) {
+                    auto* q=out[i-1].backend().data();
+                    mpf_div(q,a.mantissa[i].backend().data(),a.mantissa[i-1].backend().data());
+                    mpf_abs(q,q);
+                    ops.difference(d,a.exponent[i],a.exponent[i-1]);
+                    ops.add(d,normalize(q));
+                    // Each round replaces q*2^d by its square root, making d even before halving
+                    // it. Every square root halves the relative error carried by q.
+                    for(unsigned r=0;r<steps;++r) {
+                        if(ops.odd(d)) {
+                            mpf_mul_2exp(q,q,1);
+                            ops.add(d,-1);
+                        }
+                        mpf_sqrt(q,q);
+                        ops.halve_even(d);
+                    }
+                    scale_2exp(q,ops.small(d));
+                }
+                return out;
+            }
+            long cut;
+            NarrowExponents narrow_ops;
+            WideExponents wide_ops;
+            bool wide=false;
+            Iterate<Narrow> narrow,narrow_next;
+            Iterate<Z> broad,broad_next;
+            std::vector<Narrow> terms;
+            std::vector<Z> wide_terms;
+            Narrow narrow_scratch=0;
+            Z wide_scratch;
+            Real accumulator,product;
+        };
+        // Terms below 10^-(work+10) of their sum's largest term are dropped: the cut in bits is
+        // the bit length of 10^(work+10).
+        long graeffe_cut(unsigned work) {
+            return static_cast<long>(bits(pow10(work+10)));
         }
+        // The nearest power of ten: e with 10^(e-1/2) <= positive < 10^(e+1/2), so that
+        // 10^(e-1) < positive < 10^(e+1). The estimate only sets UNTRUSTED proposal widths, never
+        // acceptance. It is decided by the exact test 10^(2e-1) <= positive^2 < 10^(2e+1), so it
+        // depends on the value alone, not on the dyadic form of a converted floating candidate.
+        // Its boundaries are irrational, so a rational candidate is never on one, and low-order
+        // candidate noise can move it only next to some sqrt(10)*10^k.
         long decimal_scale(const Q& positive) {
-            // If this returns e, 10^(e-1) < positive < 10^(e+1).
-            // The estimate only sets UNTRUSTED proposal widths, never acceptance.
-            return static_cast<long>(positive.get_num().get_str().size())-
-                   static_cast<long>(positive.get_den().get_str().size());
+            // The digit-count estimate is floor(log10(positive)) or one more; so is the result.
+            const long digits=static_cast<long>(positive.get_num().get_str().size())-
+                              static_cast<long>(positive.get_den().get_str().size());
+            // Far beyond the 10^5 decimal-scale resource limit, the estimate is kept.
+            if(digits>1000000||digits< -1000000)return digits;
+            const Q square=positive*positive;
+            for(long e=digits+1;e>digits-1;--e) {
+                const long exponent=2*e-1;
+                Z power;
+                mpz_ui_pow_ui(power.get_mpz_t(),10,static_cast<unsigned long>(exponent<0?-exponent:exponent));
+                Q bound=exponent<0?Q(1,power):Q(power);
+                bound.canonicalize();
+                if(square>=bound)return e;
+            }
+            return digits-1;
         }
         // The least m with den | 10^m, when den>0 has no prime factors besides 2 and 5.
         std::optional<unsigned long> decimal_exponent(const Z& den) {
@@ -345,6 +541,18 @@ namespace secular {
             return o;
         }
     }
+    GraeffeCandidates graeffe_candidates(const std::vector<Z>& c,unsigned work,unsigned squarings,unsigned narrow_bits) {
+        if(c.size()<2||work<32||work>20000||squarings<1||squarings>512||narrow_bits<1)
+            throw std::invalid_argument("invalid Graeffe candidate request");
+        Real::default_precision(work);
+        Graeffe graeffe(c,graeffe_cut(work),narrow_bits);
+        for(unsigned step=0;step<squarings;++step)graeffe.square();
+        const auto roots=graeffe.roots(squarings);
+        GraeffeCandidates out;
+        out.unbounded_exponents=graeffe.wide_exponents();
+        for(const auto& r:roots)out.roots.push_back(rational(r));
+        return out;
+    }
     void validate_options(const Options& o) {
         if(o.digits<1||o.digits>1000||o.precision<32||o.max_precision<o.precision||o.max_precision>20000||o.max_squarings<1||o.max_squarings>512)throw std::invalid_argument("invalid resource limits (digits 1..1000, precision 32..20000, squarings 1..512)");
         if(o.oracle_workers>64)throw std::invalid_argument("oracle workers must be 0..64");
@@ -379,26 +587,18 @@ namespace secular {
             if(o.progress)o.progress("Graeffe candidate pass at "+std::to_string(work)+" decimal working digits...");
             auto gt=Clock::now();
             try {
-                std::vector<SignedLog> coeff;
-                Real lead=log(Real(out.coefficients[0].get_str()));
-                for(std::size_t i=0;i<out.coefficients.size();++i) {
-                    Z z=out.coefficients[i];
-                    int s=mpz_sgn(z.get_mpz_t());
-                    if(s!=((i%2)?-1:1))throw std::logic_error("exact positive-root coefficient sign invariant failed");
-                    if(z<0)z=-z;
-                    coeff.push_back( {
-                        s,Real(log(Real(z.get_str()))-lead)
-                    });
-                }
-                const Real cutoff=-Real(work+10)*log(Real(10));
+                Graeffe graeffe(out.coefficients,graeffe_cut(work));
+                out.graeffe_unbounded_exponents=false;
                 const Real threshold("1e-"+std::to_string(o.digits+16));
                 std::vector<Real> previous;
                 unsigned next_certification=0,certification_delay=2;
                 for(unsigned step=1;step<=o.max_squarings;++step) {
-                    coeff=square_roots(coeff,cutoff);
+                    graeffe.square();
                     out.graeffe_steps=step;
+                    out.graeffe_unbounded_exponents=graeffe.wide_exponents();
                     if(step%2&&step!=o.max_squarings)continue;
-                    auto candidates=recover(coeff,step);
+                    auto candidates=graeffe.roots(step);
+                    out.graeffe_unbounded_exponents=graeffe.wide_exponents();
                     bool stable=previous.size()==candidates.size();
                     for(std::size_t i=0;i<candidates.size();++i) {
                         if(candidates[i]<=0||(i&&candidates[i]>=candidates[i-1]))stable=false;
@@ -569,6 +769,7 @@ namespace secular {
            <<"  \"decimal_places\": "<<digits<<",\n"
            <<"  \"working_decimal_digits\": "<<r.working_digits<<",\n"
            <<"  \"graeffe_squarings\": "<<r.graeffe_steps<<",\n"
+           <<"  \"graeffe_unbounded_exponents\": "<<(r.graeffe_unbounded_exponents?"true":"false")<<",\n"
            <<"  \"precision_attempts\": "<<r.attempts<<",\n"
            <<"  \"exact_divisions\": "<<r.exact_divisions<<",\n"
            <<"  \"coefficient_bits_max\": "<<r.max_coefficient_bits<<",\n"
