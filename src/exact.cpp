@@ -818,8 +818,18 @@ namespace secular {
     }
     Inertia inertia(const ZMatrix& original) {
         if(!symmetric(original))throw std::invalid_argument("inertia requires symmetric matrix");
-        ZMatrix a=original;
         Inertia out;
+        if(diagonal(original)) {
+            // The eigenvalues of a diagonal matrix are its diagonal entries.
+            for(std::size_t i=0;i<original.n;++i) {
+                const int sign=mpz_sgn(original(i,i).get_mpz_t());
+                if(sign>0)++out.positive;
+                else if(sign<0)++out.negative;
+                else ++out.zero;
+            }
+            return out;
+        }
+        ZMatrix a=original;
         Z previous=1;
         for(std::size_t k=0;k<a.n;++k) {
             std::size_t p=k;

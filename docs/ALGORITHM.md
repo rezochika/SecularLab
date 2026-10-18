@@ -30,6 +30,8 @@ The output coefficient file stores the left-hand polynomial, with L recorded. It
 coefficient is det(E), not 1. Eigenvalues are unchanged by this known scalar factor.
 
 The solver proves positive definiteness of both E and F by exact inertia before root recovery.
+For a diagonal matrix, such as the usual lumped mass matrix, that inertia is the sign count of
+its diagonal entries, in O(n) after the O(n^2) test that it is diagonal.
 The general coefficient command only requires nonsingular E.
 
 ## 2. Exact characteristic coefficients
@@ -149,8 +151,9 @@ For rational s=p/q with q>0, the integer symmetric matrix
 has the same inertia as K-sM. Because M is positive definite, its positive eigenvalue count
 is exactly the number of generalized eigenvalues greater than s.
 
-The fast inertia routine uses fraction-free symmetric elimination. Symmetric row/column
-permutations are congruences and do not alter inertia. At each step the sign of the LDL
+The fast inertia routine uses fraction-free symmetric elimination. A diagonal matrix needs no
+elimination: its eigenvalues are its diagonal entries, so their signs are counted directly.
+Symmetric row/column permutations are congruences and do not alter inertia. At each step the sign of the LDL
 pivot equals sign(current Bareiss pivot / previous Bareiss pivot).
 
 When all active diagonal entries are zero but an off-diagonal remains, the program falls
