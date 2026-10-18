@@ -260,10 +260,12 @@ such decimal points share a table T_i = q_i*Q^i for a power of ten Q. The table 
 and each sign is then the sign of sum_i T_i (xQ)^(n-i) = Q^n q(x), where xQ is an integer. Q is
 always the exact key: a point uses a table only after the exact test that den(x) divides Q, and
 any other point uses the general evaluation. Both give the identical sign; only the work changes.
+A table is not built when it would exceed 2^28 bits, or when Q is much longer than den(x), as
+for den(x)=2^a; such points use the general evaluation too.
 
-Within one solve, the signs of the fixed coefficient vector are kept in a memo keyed by the
-exact canonical rational. The final gate therefore re-reads the signs that certify_one computed
-instead of evaluating them again. A missing key is still evaluated, so the gate still catches a
+Within one certification attempt, the signs of the fixed coefficient vector are kept in a memo
+keyed by the exact canonical rational. The final gate therefore re-reads the signs that
+certify_one computed instead of evaluating them again. A missing key is still evaluated, so the gate still catches a
 row whose endpoints were never tested. `verify` starts with an empty memo.
 `polynomial_sign_evaluations` counts the evaluations actually performed, not memo hits.
 

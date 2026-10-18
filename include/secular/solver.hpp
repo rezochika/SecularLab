@@ -32,6 +32,8 @@ namespace secular {
         // det(zE-F)=scale^n det(zM-K)
         std::size_t order {},exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
         unsigned working_digits {},graeffe_steps {},attempts {};
+        // Times the candidates of some pass were submitted to exact certification.
+        unsigned certification_attempts {};
         // The final Graeffe pass outgrew 64-bit binary exponents and continued with unbounded ones.
         bool graeffe_unbounded_exponents=false;
         bool coefficient_identity_verified=false;

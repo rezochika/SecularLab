@@ -313,6 +313,10 @@ namespace secular {
             const std::vector<Z>& coefficients()const {
                 return co;
             }
+            // Signs are memoized for one certification attempt; tables stay for the solve.
+            void new_attempt() {
+                memo.clear();
+            }
             int operator()(const Q& x,SolveResult& result) {
                 if(const auto hit=memo.find(x);hit!=memo.end())return hit->second;
                 ++result.polynomial_sign_evaluations;
@@ -336,9 +340,11 @@ namespace secular {
                     // A table holds about n^2/2 factors 10^m in all, while one general evaluation
                     // holds two numbers of n such factors. Very long denominators, as a replayed
                     // file may contain, are therefore evaluated directly.
-                    // n <= 257 and m <= 10^5 keep this estimate far inside 64 bits.
+                    // n <= 257 and m <= 10^5 keep this estimate far inside 64 bits. A
+                    // denominator such as 2^a, far shorter than its 10^a, is also cheaper directly.
                     const std::uint64_t n=co.size(),power_bits=*power*3322/1000+1;
-                    if(coefficient_bits+n*(n+1)/2*power_bits>table_bits)return polynomial_sign(co,x);
+                    if(coefficient_bits+n*(n+1)/2*power_bits>table_bits||power_bits>bits(x.get_den())+64)
+                        return polynomial_sign(co,x);
                     if(tables.size()==capacity)tables.erase(tables.begin());
                     tables.push_back({*power,ScaledPolynomial(co,pow10(static_cast<unsigned>(*power)))});
                     best=&tables.back();
@@ -591,7 +597,7 @@ namespace secular {
             out.total_seconds=elapsed(begin);
             return out;
         }
-        // Signs of the fixed coefficient vector, shared by every certification attempt.
+        // Signs of the fixed coefficient vector; its scaled tables serve every attempt.
         SignEvaluator signs(out.coefficients);
         for(unsigned work=o.precision;;) {
             ++out.attempts;
@@ -623,6 +629,8 @@ namespace secular {
                         const bool try_polynomial=o.polynomial_certification&&out.coefficient_identity_verified;
                         if(o.progress)o.progress(std::string("Testing ")+(try_polynomial?"exact full-spectrum polynomial proof":"exact inertia")+" and decimal rounding after "+std::to_string(step)+" squarings...");
                         auto ct=Clock::now();
+                        ++out.certification_attempts;
+                        signs.new_attempt();
                         std::vector<RootCertificate> roots;
                         std::string method="exact_inertia";
                         bool per_root_failure=false;
@@ -784,6 +792,7 @@ namespace secular {
            <<"  \"graeffe_squarings\": "<<r.graeffe_steps<<",\n"
            <<"  \"graeffe_unbounded_exponents\": "<<(r.graeffe_unbounded_exponents?"true":"false")<<",\n"
            <<"  \"precision_attempts\": "<<r.attempts<<",\n"
+           <<"  \"certification_attempts\": "<<r.certification_attempts<<",\n"
            <<"  \"exact_divisions\": "<<r.exact_divisions<<",\n"
            <<"  \"coefficient_bits_max\": "<<r.max_coefficient_bits<<",\n"
            <<"  \"recurrence_workspace_bits_max\": "<<r.max_workspace_bits<<",\n"

@@ -49,7 +49,8 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         assert result['inertia_evaluations']==2 # mandatory K/M SPD guards only
         assert result['times_seconds']['initialization']>=0 and result['times_seconds']['squarefree']>=0
         assert result['graeffe_unbounded_exponents'] is False # 64-bit binary exponents sufficed
-        checks+=6
+        assert result['certification_attempts']==1 # the first stable candidates certify
+        checks+=7
         run(['coefficients','--matrix',matrix/'spd3.mtx','--workers',workers,'--out',d/('coeff'+str(workers))])
     for artifact in ('coefficients.tsv','eigenvalues.tsv'):
         assert (d/'workers1'/artifact).read_bytes()==(d/'workers4'/artifact).read_bytes(); checks+=1

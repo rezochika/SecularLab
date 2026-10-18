@@ -141,6 +141,9 @@ namespace {
         try {
             (void)graeffe_candidates({1,1},128,4);
         }
+        catch(const std::invalid_argument&) {
+            // Request validation must accept this shape; only the sign invariant rejects it.
+        }
         catch(const std::logic_error&) {
             caught=true;
         }

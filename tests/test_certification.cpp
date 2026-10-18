@@ -21,7 +21,8 @@ static void compare_methods(const QMatrix& k,unsigned digits,const std::vector<s
     // Earlier candidates of a cluster fail inside certify_one. Under the verified identity
     // exact inertia provably fails on them too, so it is not tried.
     require(fast.inertia_evaluations==2,"fast solve tried the futile inertia fallback");
-    require(!early_failure||fast.polynomial_sign_evaluations>4*k.n,"cluster had no failed polynomial attempt");
+    require(early_failure?fast.certification_attempts>1:fast.certification_attempts>=1,
+            "cluster had no failed polynomial attempt");
     require(fast.coefficient_oracle=="modular"&&fast.oracle_moduli>=1&&
             fast.oracle_workers==std::min<std::size_t>(2,fast.oracle_moduli)&&fast.recurrence_workers==2&&
             fast.squarefree_modular_prime!=0,"oracle, recurrence workers and modular witness reported");
