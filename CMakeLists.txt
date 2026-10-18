@@ -54,6 +54,13 @@ if(BUILD_TESTING)
     set_tests_properties(cli_and_matrix_integration PROPERTIES TIMEOUT 180)
     add_test(NAME matrix_file_integrity
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_matrices.py)
+    foreach(order IN ITEMS 8 16 32)
+      add_test(NAME known_spectrum_${order}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_known_spectrum.py
+                $<TARGET_FILE:secular> --orders ${order})
+      set_tests_properties(known_spectrum_${order} PROPERTIES
+        TIMEOUT 180 LABELS "known-spectrum" PROCESSORS 4)
+    endforeach()
     if(SECULAR_LONG_TESTS)
       add_test(NAME oilrig_66_full_certification
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oilrig.py

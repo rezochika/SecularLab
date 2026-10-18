@@ -16,7 +16,7 @@ The full published **BCSSTK02 / BCSSTM02 66 x 66 oil-rig pair is included**, alo
 
 ### Windows: CLion bundled MinGW
 
-The current Windows checkout uses CLion's bundled MinGW compiler with project-local GMP C++ and Boost dependencies. See [Windows setup](docs/WINDOWS_SETUP.md) for the reproducible setup command and the `windows-clion` Release and `windows-clion-debug` profiles. Both native configurations pass the five standard test groups. CLion's build action and the small example were also exercised successfully.
+The current Windows checkout uses CLion's bundled MinGW compiler with project-local GMP C++ and Boost dependencies. See [Windows setup](docs/WINDOWS_SETUP.md) for the reproducible setup command and the `windows-clion` Release and `windows-clion-debug` profiles. Both native configurations support the standard test groups. CLion's build action and the small example were also exercised successfully.
 
 ### Windows: alternative MSYS2 UCRT64 toolchain
 
@@ -152,7 +152,24 @@ The certificate refers to the matrix whose published entries are interpreted as 
 ctest --preset release --output-on-failure
 ```
 
-The standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, fast exact arithmetic, both certification methods, CLI examples, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, disjoint certificates for tiny roots, serial/parallel artifact equivalence, altered certificates, matrix mismatch, and replay independent of saved coefficient/status files. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
+The standard test groups cover exact arithmetic/certificates, additional exact algebra, clustered and widely scaled root recovery, fast exact arithmetic, both certification methods, CLI examples, known-spectrum generalized pencils, and byte integrity of both external matrices. Regressions include malformed numeric signs, mismatched pencil dimensions, continued Graeffe convergence after an early failed certificate, disjoint certificates for tiny roots, serial/parallel artifact equivalence, altered certificates, matrix mismatch, and replay independent of saved coefficient/status files. The dense 3-by-3 fixture is also checked directly against its known eigenvalues 4, 2, 1, including all certificate bounds and radii. Python is optional for building the solver, but required for the CLI/data tests. All Python tests in CTest use the standard library only.
+
+The known-spectrum tests construct `M = C^T C` and `K = C^T D C` using Python's exact `Fraction` arithmetic. Each spectrum has two invertible rational triangular transforms with non-unit determinants and non-diagonal mass matrices. The independent reference polynomial is `det(C)^2 * product(z - D[i,i])`; every emitted coefficient must equal this reference multiplied by the independently derived denominator-clearing factor `L^n`. No solver polynomial, inertia, or rounding helper supplies expected values.
+
+The cases cover separated roots at 50 decimal places, close distinct roots with the same printed decimal, and exact half-away-from-zero rounding ties. Tests check every root's enclosure, index, rounded decimal, endpoint rounding, radius and separation. Each input exercises `auto` and `inertia` in both solve and replay with one and four oracle workers, with serial/parallel artifact equivalence. Deliberately corrupted output controls confirm that the independent checker rejects incorrect coefficients and certificates. This deterministic family complements the recorded engineering runs; it does not replace them or imply that every supported matrix will certify within a fixed resource budget.
+
+Orders 8, 16 and 32 are all registered in the normal CTest suite as `known_spectrum_8`, `known_spectrum_16` and `known_spectrum_32`. Each order exercises six pencils with 24 solves and 24 cross-method replays. Local Windows CLion Release measurements took approximately 1.22, 1.87 and 8.41 seconds per order, respectively, so these cases do not require the optional slow engineering-test flag. These are observed runtimes, not pass/fail thresholds or performance guarantees. With Python available, the standard suite now contains ten test groups.
+
+```bash
+# Only the three known-spectrum groups; use the Windows CLion preset locally.
+ctest --preset windows-clion -L known-spectrum --output-on-failure
+
+# Optional diagnostic run, retaining generated inputs, outputs and timings.
+# Both destination paths must be new.
+python tests/test_known_spectrum.py build/windows-clion/secular.exe --orders 8 16 32 --report results/known-spectrum.json --artifacts-dir results/known-spectrum-runs
+```
+
+On Linux/macOS, substitute the `release` preset and `build/release/secular` executable. The new suite requires no third-party Python packages or network access.
 
 Optional slow full-matrix solve plus certificate replay:
 

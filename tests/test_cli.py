@@ -1,6 +1,32 @@
 #!/usr/bin/env python3
 """Standard-library integration tests. No network and no numerical Python libraries."""
 import json, pathlib, subprocess, sys, tempfile
+from fractions import Fraction
+
+
+def check_dense_known_spectrum(certificate):
+    # P = [[1,2,1], [0,1,-1], [0,0,1]] is invertible. The fixtures are
+    # M=P^T P and K=P^T diag(1,2,4) P, so their exact spectrum is 4,2,1.
+    rows=[line.split('\t') for line in certificate.read_text().splitlines()
+          if line and not line.startswith('#')]
+    assert rows[0]==['index','decimal','lower','upper','radius'], 'dense certificate columns'
+    rows=rows[1:]
+    assert len(rows)==3, 'dense certificate must contain the complete three-root spectrum'
+    count=2
+    previous_lower=None
+    for index,(fields,root) in enumerate(zip(rows,(Fraction(4),Fraction(2),Fraction(1)))):
+        assert len(fields)==5, ('dense certificate field count',index,fields)
+        assert fields[0]==str(index), ('dense root index',index,fields[0])
+        assert fields[1]==str(root)+'.'+'0'*50, ('dense canonical 50-place rounding',index,fields[1])
+        printed,lower,upper,radius=map(Fraction,fields[1:])
+        assert lower<=root<=upper, ('dense known root not enclosed',index,root,lower,upper)
+        assert previous_lower is None or upper<previous_lower, ('dense bounds overlap or are out of order',index)
+        assert radius>=max(abs(printed-lower),abs(printed-upper),abs(printed-root)), ('dense radius too small',index)
+        previous_lower=lower
+        count+=6
+    return count
+
+
 exe=pathlib.Path(sys.argv[1]).resolve();root=pathlib.Path(sys.argv[2]).resolve();matrix=root/'matrices/examples'
 checks=0
 with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
@@ -81,6 +107,7 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         assert result['certified'] and result['coefficient_identity_verified']; checks+=1
         run(['verify','--matrix',out/'input_K.mtx','--mass',out/'input_M.mtx','--cert',out/'eigenvalues.tsv'])
     run(['solve','--matrix',matrix/'dense_stiffness3.mtx','--mass',matrix/'dense_mass3.mtx','--digits','50','--out',d/'dense'])
+    checks+=check_dense_known_spectrum(d/'dense/eigenvalues.tsv')
     run(['verify','--matrix',d/'dense/input_K.mtx','--mass',d/'dense/input_M.mtx','--cert',d/'dense/eigenvalues.tsv'])
     run(['solve','--matrix',matrix/'galerkin6_K0.mtx','--mass',matrix/'galerkin6_M.mtx','--affine',matrix/'galerkin6_K1.mtx','--legendre-degree','128','--argument','1/3','--out',d/'galerkin6'])
     run(['verify','--matrix',d/'galerkin6/input_K.mtx','--mass',d/'galerkin6/input_M.mtx','--cert',d/'galerkin6/eigenvalues.tsv'])
