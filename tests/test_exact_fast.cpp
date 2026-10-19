@@ -2,6 +2,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <thread>
 
 using namespace secular;
 
@@ -91,9 +92,22 @@ int main() {
         // residue -1 modulo 65537. Inverting it squares 65536, beyond uint32.
         auto wide_product=check_squarefree({65536,0,2310});
         check(!wide_product.repeated&&wide_product.modular_prime==65537,"modular product overflow");
-        const Z all_primes=Z(2310)*65537;
+        // x(x-a) is squarefree modulo p exactly when p does not divide a; the primes below
+        // 2^32 follow 65537 in a fixed order, and only all of them failing reaches the gcd.
+        Z small_primes=Z(2310)*65537;
+        auto mersenne=check_squarefree({1,-small_primes,0});
+        check(!mersenne.repeated&&mersenne.modular_prime==2147483647UL,"2^31-1 witness unavailable");
+        small_primes*=2147483647UL;
+        auto below_2_32=check_squarefree({1,-small_primes,0});
+        check(!below_2_32.repeated&&below_2_32.modular_prime==4294967291UL,"2^32-5 witness unavailable");
+        small_primes*=4294967291UL;
+        auto last_32_bit=check_squarefree({1,-small_primes,0});
+        check(!last_32_bit.repeated&&last_32_bit.modular_prime==4294967279UL,"2^32-17 witness unavailable");
+        const Z all_primes=small_primes*4294967279UL;
         auto fallback=check_squarefree({1,-all_primes,0});
         check(!fallback.repeated&&fallback.modular_prime==0,"inconclusive reductions must use exact gcd");
+        auto fallback_repeated=check_squarefree({1,-2*all_primes,all_primes*all_primes});
+        check(fallback_repeated.repeated&&fallback_repeated.modular_prime==0,"exact gcd missed (x-a)^2");
         auto content=check_squarefree({-6,0,12});
         check(!content.repeated&&content.modular_prime!=0,"negative content obscured witness");
         auto content_repeated=check_squarefree({-18,36,-18});
@@ -107,8 +121,27 @@ int main() {
         check(oracle_worker_count(64,3)==3,"workers not clamped to jobs");
         check(oracle_worker_count(0,0)==0,"zero jobs must use no workers");
         check(oracle_worker_count(0,1)==1,"auto singleton worker count");
-        const auto automatic=oracle_worker_count(0,100);
-        check(automatic>=1&&automatic<=8,"auto worker cap");
+        // Automatic uses every hardware thread, at most the 64 that may be requested.
+        const unsigned hardware=std::min(64u,std::max(1u,std::thread::hardware_concurrency()));
+        check(oracle_worker_count(0,100)==std::min(hardware,100u),"auto worker count");
+        check(oracle_worker_count(0,2)==std::min(hardware,2u),"auto workers not clamped to jobs");
+
+        // Checked exact division: one truncating division, accepted only at remainder zero.
+        const Z wide_value=pow10(400)+7;
+        const std::vector<Z> divisors{Z(3),Z(-3),Z(Z(1)+pow10(30)),Z(-(Z(1)+pow10(30))),Z(pow10(200)+1)};
+        for(const Z& divisor:divisors) {
+            check(exact_divide(wide_value*divisor,divisor)==wide_value,"exact quotient");
+            check(exact_divide(-wide_value*divisor,divisor)==-wide_value,"negative exact quotient");
+            bool caught=false;
+            try { exact_divide(wide_value*divisor+1,divisor); }
+            catch(const std::logic_error&) { caught=true; }
+            check(caught||divisor==1,"non-exact division accepted");
+        }
+        check(exact_divide(Z(0),Z(5))==0,"zero dividend");
+        bool zero_divisor=false;
+        try { exact_divide(Z(0),Z(0)); }
+        catch(const std::logic_error&) { zero_divisor=true; }
+        check(zero_divisor,"zero divisor accepted");
         invalid([&] { oracle_worker_count(65,10); },"excess workers accepted");
         invalid([&] { oracle_worker_count(65,0); },"zero jobs bypassed worker validation");
 

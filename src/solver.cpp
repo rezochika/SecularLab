@@ -540,7 +540,9 @@ namespace secular {
         // On failure, per_root_failure tells whether it happened before every candidate had a
         // row: in the mode-independent ordering checks or inside certify_one. Exact inertia
         // certifies one root per worker, with identical results for every worker count.
-        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,unsigned workers,SolveResult& result,bool& per_root_failure) {
+        // inertia_stop carries, between attempts, the root at which the last inertia pass
+        // stopped. It starts at 0, so a first pass also runs the largest root alone first.
+        std::vector<RootCertificate> certify_all(const IntegerPencil& p,SignEvaluator& signs,const std::vector<Real>& candidates,unsigned digits,unsigned work,bool polynomial,unsigned workers,SolveResult& result,bool& per_root_failure,std::size_t& inertia_stop) {
             per_root_failure=true;
             const auto count=candidates.size();
             std::vector<Q> approximations;
@@ -586,7 +588,7 @@ namespace secular {
                 // then gives the counters and memo of the serial loop for every worker count. A
                 // root above a known failure abandons its eliminations.
                 std::vector<RootTrace> traces(ordered);
-                const auto run=run_ordered(ordered,workers,[&](std::size_t i,const CancelCheck& superseded) {
+                const std::function<bool(std::size_t,const CancelCheck&)> job=[&](std::size_t i,const CancelCheck& superseded) {
                     auto& trace=traces[i];
                     auto sign=[&](const Q& x) {
                         trace.signs.emplace_back(x,std::nullopt);
@@ -601,7 +603,23 @@ namespace secular {
                     };
                     rows[i]=certify_one(sign,shifted,approximations[i],separations[i],i,digits,work,false);
                     return rows[i].has_value();
-                });
+                };
+                // Speculation window: roots above the one that decides an attempt only compete
+                // with it for cores and are then discarded. Roots 0..f run first, where f is the
+                // root at which the last pass stopped (initially 0, the largest root, at which a
+                // precision-limited attempt fails), and the rest fan out only once those pass.
+                // Prefix then suffix is still the serial loop, so the stop, its exception and
+                // every counter are unchanged.
+                const std::size_t prefix=std::min(ordered,inertia_stop<ordered?inertia_stop+1:ordered);
+                auto run=run_ordered(prefix,workers,job);
+                if(run.stop==prefix&&prefix<ordered) {
+                    const auto rest=run_ordered(ordered-prefix,workers,[&](std::size_t i,const CancelCheck& superseded) {
+                        return job(prefix+i,superseded);
+                    });
+                    run.stop=prefix+rest.stop;
+                    run.error=rest.error;
+                }
+                inertia_stop=run.stop;
                 for(std::size_t i=0;i<ordered&&i<=run.stop;++i) {
                     result.inertia_evaluations+=traces[i].inertia_evaluations;
                     for(const auto& [x,value]:traces[i].signs)signs.replay(x,value,result);
@@ -679,6 +697,8 @@ namespace secular {
         // Signs of the fixed coefficient vector; its scaled tables serve every attempt.
         SignEvaluator signs(out.coefficients);
         const unsigned certification_workers=oracle_worker_count(o.oracle_workers,k.n);
+        // Where the last exact-inertia pass stopped; the window starts at the largest root.
+        std::size_t inertia_stop=0;
         for(unsigned work=o.precision;;) {
             ++out.attempts;
             out.working_digits=work;
@@ -715,14 +735,14 @@ namespace secular {
                         std::string method="exact_inertia";
                         bool per_root_failure=false;
                         if(try_polynomial) {
-                            roots=certify_all(p,signs,candidates,o.digits,work,true,certification_workers,out,per_root_failure);
+                            roots=certify_all(p,signs,candidates,o.digits,work,true,certification_workers,out,per_root_failure,inertia_stop);
                             if(roots.size()==k.n)method="polynomial";
                         }
                         // With q = det(zE-F) verified, a per-root polynomial failure proves that
                         // exact inertia fails on the same proposals (docs/ALGORITHM.md, section
                         // 4). Only a failure of the final gates is retried with exact inertia.
                         if(roots.size()!=k.n&&!(try_polynomial&&per_root_failure))
-                            roots=certify_all(p,signs,candidates,o.digits,work,false,certification_workers,out,per_root_failure);
+                            roots=certify_all(p,signs,candidates,o.digits,work,false,certification_workers,out,per_root_failure,inertia_stop);
                         out.certification_seconds+=elapsed(ct);
                         if(roots.size()==k.n) {
                             out.roots=std::move(roots);

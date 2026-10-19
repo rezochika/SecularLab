@@ -44,8 +44,9 @@ For k=1,...,n:
     c_k = trace(T_k)/k
     S_k = J(T_k-c_k I)/d.
 
-`exact_divide` explicitly tests GMP divisibility before every stated division, including
-Release builds. The last S_n must be the zero matrix. The exported vector is
+`exact_divide` checks every stated division, including Release builds: one truncating GMP
+division must leave remainder zero, or the run stops. The same check replaces the separate
+divisibility test inside Bareiss elimination and the fraction-free inertia routine. The last S_n must be the zero matrix. The exported vector is
 `[d, -c_1, ..., -c_n]`, in descending powers. These signs matter.
 
 For diagonal E, applying J*T/d is equivalent to dividing row i of T by E_ii. The implementation
@@ -119,8 +120,12 @@ recurrence, not independent authorship or formal verification of the implementat
 `--no-coefficient-check` skips the oracle; it never disables the recurrence's exact division and
 terminal-zero checks.
 
-Before recovery, a primitive integer pseudo-remainder gcd of f and f' detects repeated roots.
-They are reported as `REPEATED_SPECTRUM`, with no claim of distinct indexed enclosures.
+Before recovery, squarefreeness is tested modulo the fixed primes 2, 3, 5, 7, 11, 65537, 2^31-1,
+2^32-5 and 2^32-17, in that order. A prime that keeps the degree and gives gcd(f, f') = 1 modulo p
+proves f squarefree. Otherwise a primitive integer pseudo-remainder gcd of f and f' decides
+exactly. The primes below 2^32 make that slower fallback rare when small primes divide the
+leading coefficient or the discriminant. Repeated roots are reported as `REPEATED_SPECTRUM`,
+with no claim of distinct indexed enclosures.
 
 ### Formal affine mode
 
@@ -366,6 +371,11 @@ for every worker count:
   and so does the memo that a later step of the same attempt reads.
 - An exception is rethrown after this counting, and only when it came from the stopping root. An
   exception from a root above a failure is dropped, since the serial loop never reaches that root.
+- In `solve`, each pass runs in two parts: first the prefix of roots 0..f, where f is the root at
+  which the previous pass stopped (initially 0), then, only if all of them pass, the remaining
+  roots. Roots above the one that decides an attempt would only compete with it for cores and be
+  discarded. Precision-limited attempts fail at the largest root, which then runs alone. Prefix
+  then suffix is still the serial loop, so the stop, its exception and the counters are unchanged.
 - A root that is already running when a lower one stops abandons its exact work. Elimination
   polls once per pivot, the proposal once per factorization step and the dominance check once per
   row, whether the run has stopped below that root; if so they throw, and the exception is
@@ -374,7 +384,10 @@ for every worker count:
   serial replay.
 
 Each running root holds its own proposal and, when elimination decides, its own Bareiss matrix,
-so peak memory grows with the worker count; `--workers 1` bounds it to one root. The polynomial
+so peak memory grows with the worker count; `--workers 1` bounds it to one root. Each point of
+the Bareiss coefficient oracle likewise holds its own n x n determinant matrix. The default worker
+count is the hardware thread count, which cannot see CPU-rate quotas or cgroup limits; under those,
+pass `--workers` equal to the quota. The polynomial
 proof stays serial: its signs share one evaluator's scaled tables and memo, and its whole
 certification takes about 0.05 s on BCSSTK05. With eight workers `--certification inertia` now
 solves the oil rig in about 0.27 s instead of 78 s, and BCSSTK05 in about 2 s instead of 2024 s
