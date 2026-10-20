@@ -91,9 +91,10 @@ reduced stiffness entries fit one 64-bit limb.
 
 By default the result is then checked independently of the recurrence by a multimodular
 characteristic polynomial (`--oracle auto`). For a prime p not dividing det E, det(zE-F) =
-det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced to upper Hessenberg form by
-similarity, its characteristic polynomial follows from the Hessenberg recurrence, and all n+1
-coefficients of q, including q_0=det E, must match det(E) chi modulo p.
+det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced by similarity to upper
+Hessenberg form (or, for a symmetric pencil, to tridiagonal form, below), its characteristic
+polynomial follows from the Hessenberg recurrence, and all n+1 coefficients of q, including
+q_0=det E, must match det(E) chi modulo p.
 
 Every residue is a field computation modulo p, so any correct algorithm gives the same residues;
 the kernel is chosen for speed. It forms B = (E^-1 F)^T, which has the characteristic polynomial
@@ -106,12 +107,36 @@ of that product gives l_(j+1). While the columns below the subdiagonal stay spar
 elimination row r -= u_r row j+1, column j+1 += u_r column r runs instead and skips zero rows and
 columns; it hands over at the first column with more than a quarter of those entries nonzero.
 det(zI-H) then follows from the recurrence p_k = z p_(k-1) - sum_(s<k) g_s p_s, one dot product per
-coefficient. The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
+coefficient.
+
+When E and F are both symmetric, which is decided once per pencil, two routes use the symmetry.
+A non-diagonal E is factored E = L D L^T without pivoting, L unit lower triangular, and the
+congruence C = L^-1 F L^-T gives det(zE-F) = det(zD-C) with C symmetric. The factor, the upper
+triangle of L^-1 F and the lower triangle of C take n^3/6 + n^3/6 + n^3/3 products, against
+n^3/3 + n^3 for LU and the solves, again skipping the leading zeros of the rows of E. The pencil
+(D, S), with D diagonal and S symmetric (S = C, or S = F when E is diagonal), then goes to Lanczos
+in the inner product <x,y> = x^T D y, for which D^-1 S is self-adjoint. From a fixed
+pseudo-random start, the recurrence q_(k+1) = D^-1 S q_k - alpha_k q_k - beta_k q_(k-1), with
+delta_k = <q_k,q_k>, alpha_k = q_k^T S q_k/delta_k and beta_k = delta_k/delta_(k-1), keeps the q_k
+pairwise D-orthogonal over any field while every delta_k is nonzero. After n steps they are a
+basis in which D^-1 S is tridiagonal, and p_(k+1) = (z-alpha_k) p_k - beta_k p_(k-1) gives its
+characteristic polynomial in O(n^2). Each step is one product with S and O(n) work, all in dot
+products. A vanishing delta_k is the exact breakdown: an invariant subspace or an isotropic vector,
+rare for 61-bit primes unless eigenvalues repeat, and common for small ones. That modulus then
+reduces D^-1 S to Hessenberg form instead. A zero LDL^T pivot, possible without p dividing det E,
+sends the modulus to the LU route. For a diagonal E and a sparse F, Lanczos costs about n(T+20n)
+products, with T the entries of F used per product: its nonzeros when they fill less than half of
+the rows' ranges, otherwise those ranges. The Hessenberg form of a banded F usually fills in, but
+exact cancellation can keep it sparse, as for the band-3 rotation pencil. So unless F's rows are
+mostly full, the sparse reduction runs once, for one prime, counting its products, and the pencil
+keeps the cheaper route.
+
+The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
 time in 128 bits, then into 192 bits, and reduced once per dot product, and fixed multipliers use
 Shoup's precomputed quotient. So nearly every product is one 64x64-bit multiplication and an
-addition. The tests check this kernel against the plain Gauss-Jordan and Hessenberg reduction it
-replaced, on random and structured pencils and on small primes, where zero pivots and det E = 0
-modulo p are common.
+addition. The tests check every route against the plain Gauss-Jordan and Hessenberg reduction the
+kernel replaced, on random and structured pencils and on small primes, where zero pivots, Lanczos
+breakdowns and det E = 0 modulo p are common, and force each fallback at the large primes.
 
 Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
 determinant bounds every true coefficient by the corresponding coefficient B_m of
@@ -141,7 +166,7 @@ terminal-zero checks.
 ### Coefficients by Chinese remaindering
 
 The oracle's work for one prime p already yields every coefficient of a pencil's determinant
-modulo p, as det(E) chi with chi the Hessenberg characteristic polynomial of E^-1 F.
+modulo p, as det(E) chi with chi the characteristic polynomial of E^-1 F.
 `--coefficients crt` keeps these residues and combines them instead of running the recurrence.
 It takes them on the reduced pencil (E'',F'') of the 2-adic and 5-adic reduction above. With
 f_k = alpha^(n-k) beta^k (prod_i p_i)^2 > 0, the identities there give q_k = f_k c''_k, where c''
@@ -550,7 +575,19 @@ artifacts, the one-thread coefficient stage fell from 10.9 to 1.6 s and from 0.5
 those two pencils, where FLINT's exact solve and characteristic polynomial take 4.25 s and 0.30 s;
 on 32 threads it fell from 0.55 to 0.13 s and from 0.032 to 0.013 s. The dense mass of order 256
 went from 15.6 to 1.9 s on one thread. Sparse pencils, whose reduction already skipped zeros,
-changed least: the band-3 rotation of order 256 from 0.14 to 0.10 s. The n+1 Bareiss determinants instead cost
+changed least: the band-3 rotation of order 256 from 0.14 to 0.10 s. The symmetric routes then
+cut the work per prime again on symmetric pencils, still without changing a residue or the number
+of primes. On one thread a prime took 11.9 ms instead of 17.8 ms on the dense mass of order 256,
+0.38 ms instead of 1.30 ms on BCSSTK05, 0.26 ms instead of 0.43 ms on the order-64 pencil and
+0.40 ms instead of 1.02 ms on the dense separated pencil of order 100, where C has short rows. The
+diagonal-mass pencil of order 256 gained least, 6.8 ms instead of 7.7 ms: Lanczos's products
+with a dense F are as many as the Hessenberg form and its recurrence take, only more regular. In
+192 further runs, again with byte-identical artifacts, the one-thread coefficient stage fell from
+0.233 to 0.075 s on BCSSTK05, from 1.91 to 1.26 s on the dense mass, from 0.101 to 0.064 s on the
+order-64 pencil and from 1.70 to 1.49 s on the diagonal-mass pencil; on 32 threads from 0.029 to
+0.017, 0.146 to 0.107, 0.014 to 0.013 and 0.140 to 0.119 s. The Laplacian and the rotation pencil
+keep the general route; deciding that costs the rotation pencil about 0.6 ms once, 1-3% of its
+one-thread stage. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
