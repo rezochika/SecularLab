@@ -69,8 +69,10 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
     assert (d/'coeff_bareiss/coefficients.tsv').read_bytes()==(d/'coeff1/coefficients.tsv').read_bytes(); checks+=1
     # Chinese remaindering of the oracle's residues replaces the recurrence, alone or beside it
     # (N-version), for diagonal and dense mass, with or without content removal: identical artifacts.
+    # The decimal cluster runs on the reduced pencil; the integer pencils are irreducible.
     for name,pencil in (('spd3',['--matrix',matrix/'spd3.mtx']),
-                        ('dense',['--matrix',matrix/'dense_stiffness3.mtx','--mass',matrix/'dense_mass3.mtx'])):
+                        ('dense',['--matrix',matrix/'dense_stiffness3.mtx','--mass',matrix/'dense_mass3.mtx']),
+                        ('cluster3',['--matrix',matrix/'cluster3.mtx'])):
         reference=None
         for method in ('recurrence','crt','both'):
             for content in ([],['--remove-content']):
@@ -83,9 +85,12 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
                 assert (result['coefficient_moduli']>=1)==(method!='recurrence')==(result['crt_workers']>=1)
                 assert 1<=result['primitive_coefficient_bits_max']<=result['coefficient_bits_max']
                 assert result['times_seconds']['crt']>=0 and (method=='crt')==(result['recurrence_workers']==0)
+                assert (result['crt_bound_bits']>=1)==(method!='recurrence')
+                assert result['crt_reduced']==(method!='recurrence' and name=='cluster3')
+                assert method=='recurrence' or 61*result['coefficient_moduli']>=result['crt_bound_bits']+1
                 artifacts=[(out/artifact).read_bytes() for artifact in ('coefficients.tsv','eigenvalues.tsv')]
                 reference=reference or artifacts
-                assert artifacts==reference; checks+=7
+                assert artifacts==reference; checks+=10
                 replay=run(['verify',*pencil,'--cert',out/'eigenvalues.tsv','--coefficients',method,*content])
                 assert replay.stdout.split()[0]=='VERIFIED' and 'certification_method=polynomial' in replay.stdout
         if name=='spd3':

@@ -295,17 +295,17 @@ namespace secular {
                 if(remainder!=0)++root;
                 return root;
             };
-            std::vector<Z> ascending {
-                1
-            };
+            // Multiplied by one factor at a time in place: from the top, the new [z^k] is
+            // row_f*[z^k]+row_e*[z^(k-1)] while [z^(k-1)] still holds its old value.
+            std::vector<Z> ascending(e.n+1);
+            ascending[0]=1;
             for(std::size_t i=0;i<e.n;++i) {
                 const Z row_e=norm(e,i),row_f=norm(f,i);
-                std::vector<Z> product(ascending.size()+1);
-                for(std::size_t k=0;k<ascending.size();++k) {
-                    mpz_addmul(product[k].get_mpz_t(),row_f.get_mpz_t(),ascending[k].get_mpz_t());
-                    mpz_addmul(product[k+1].get_mpz_t(),row_e.get_mpz_t(),ascending[k].get_mpz_t());
+                for(std::size_t k=i+1;k>0;--k) {
+                    mpz_mul(ascending[k].get_mpz_t(),ascending[k].get_mpz_t(),row_f.get_mpz_t());
+                    mpz_addmul(ascending[k].get_mpz_t(),row_e.get_mpz_t(),ascending[k-1].get_mpz_t());
                 }
-                ascending=std::move(product);
+                mpz_mul(ascending[0].get_mpz_t(),ascending[0].get_mpz_t(),row_f.get_mpz_t());
             }
             return {ascending.rbegin(),ascending.rend()};
         }
@@ -1269,6 +1269,20 @@ namespace secular {
         // gives an exact reduction; the ascent only aims at a large sum.
         std::vector<unsigned long> congruence_exponents(const ZMatrix& e,const ZMatrix& f,unsigned long q) {
             const auto n=e.n;
+            // a_i > 0 needs q | every nonzero entry of row and column i and q^2 | a nonzero diagonal
+            // entry. Without such an i every exponent is zero; on dense matrices without q-adic
+            // structure the first entries already show it, so no valuation is computed.
+            auto possible=[&](std::size_t i) {
+                for(const ZMatrix* a: {
+                    &e,&f
+                })for(std::size_t j=0;j<n;++j)for(const Z* entry: {
+                    &(*a)(i,j),&(*a)(j,i)
+                })if(*entry!=0&&!mpz_divisible_ui_p(entry->get_mpz_t(),i==j?q*q:q))return false;
+                return true;
+            };
+            bool any=false;
+            for(std::size_t i=0;i<n&&!any;++i)any=possible(i);
+            if(!any)return std::vector<unsigned long>(n,0);
             constexpr auto unbounded=std::numeric_limits<unsigned long>::max();
             std::vector<std::vector<std::pair<std::size_t,unsigned long>>> limits(n);
             std::vector<unsigned long> cap(n,unbounded);
@@ -1304,8 +1318,26 @@ namespace secular {
         }
         Z content(const ZMatrix& a) {
             Z g=0;
-            for(const auto& v:a.data)mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),v.get_mpz_t());
+            for(const auto& v:a.data) {
+                mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),v.get_mpz_t());
+                if(g==1)break;
+            }
             return g==0?Z(1):g;
+        }
+        // f_k = prod(scale)^2 alpha^(n-k) beta^k, so that q_k = f_k c'_k maps the coefficients c' of
+        // the reduced pencil back to those of det(zE-F).
+        std::vector<Z> graded_factors(const PencilReduction& reduction) {
+            const auto n=reduction.E.n;
+            Z square=1;
+            for(const auto& s:reduction.scale)square*=s;
+            square*=square;
+            std::vector<Z> alpha(n+1,Z(1)),beta(n+1,Z(1)),factor(n+1);
+            for(std::size_t k=1;k<=n;++k) {
+                alpha[k]=alpha[k-1]*reduction.e_content;
+                beta[k]=beta[k-1]*reduction.f_content;
+            }
+            for(std::size_t k=0;k<=n;++k)factor[k]=alpha[n-k]*beta[k]*square;
+            return factor;
         }
     }
     PencilReduction reduce_pencil(const ZMatrix& e,const ZMatrix& f) {
@@ -1327,18 +1359,20 @@ namespace secular {
             }
         }
         // E' = P^-1 E P^-1 and F' = P^-1 F P^-1 by checked exact divisions, then their contents.
+        // Zero entries and unit scales need no division.
+        Z d,remainder;
         if(!r.trivial)for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
-            const Z d=r.scale[i]*r.scale[j];
-            if(d==1)continue;
-            r.E(i,j)=exact_divide(e(i,j),d);
-            r.F(i,j)=exact_divide(f(i,j),d);
+            if((r.scale[i]==1&&r.scale[j]==1)||(e(i,j)==0&&f(i,j)==0))continue;
+            mpz_mul(d.get_mpz_t(),r.scale[i].get_mpz_t(),r.scale[j].get_mpz_t());
+            exact_divide_into(r.E(i,j),e(i,j),d,remainder);
+            exact_divide_into(r.F(i,j),f(i,j),d,remainder);
         }
         r.e_content=content(r.E);
         r.f_content=content(r.F);
         for(auto [a,g]: {
             std::pair<ZMatrix*,const Z*>{&r.E,&r.e_content},std::pair<ZMatrix*,const Z*>{&r.F,&r.f_content}
         })if(*g!=1) {
-            for(auto& v:a->data)v=exact_divide(v,*g);
+            for(auto& v:a->data)if(v!=0)exact_divide_into(v,v,*g,remainder);
             r.trivial=false;
         }
         return r;
@@ -1348,18 +1382,10 @@ namespace secular {
         if(reduction.trivial)return characteristic(e,f,workers);
         auto r=characteristic(reduction.E,reduction.F,workers);
         // c_k = c'_k alpha^(n-k) beta^k prod(scale)^2, by exact integer multiplication only.
-        const auto n=e.n;
-        Z square=1;
-        for(const auto& s:reduction.scale)square*=s;
-        square*=square;
-        std::vector<Z> alpha(n+1,Z(1)),beta(n+1,Z(1));
-        for(std::size_t k=1;k<=n;++k) {
-            alpha[k]=alpha[k-1]*reduction.e_content;
-            beta[k]=beta[k-1]*reduction.f_content;
-        }
+        const auto factor=graded_factors(reduction);
         r.max_coefficient_bits=0;
-        for(std::size_t k=0;k<=n;++k) {
-            r.coefficients[k]*=alpha[n-k]*beta[k]*square;
+        for(std::size_t k=0;k<=e.n;++k) {
+            r.coefficients[k]*=factor[k];
             r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(r.coefficients[k]));
         }
         return r;
@@ -1370,11 +1396,51 @@ namespace secular {
         if(n==0||e.data.size()!=n*n||f.data.size()!=n*n)throw std::invalid_argument("invalid pencil storage");
         oracle_worker_count(requested,1);
 #ifdef SECULAR_MODULAR_ORACLE
-        // |q_m| <= B_m < M/2 once M > 2*max_m B_m; 61k >= bits(max B)+1 ensures it for k moduli.
-        const auto bound=identity_bound(e,f);
+        // The residues are those of the reduced pencil E' = P^-1 E P^-1/alpha, F' = P^-1 F P^-1/beta,
+        // whose coefficients c' give q_k = f_k c'_k (graded_factors). Both |c'_k| <= B'_k, the bound of
+        // the reduced pencil, and |c'_k| = |q_k|/f_k <= floor(B_k/f_k) hold; their minimum b_k decides.
+        // The original pencil's bound is independent of the reduction and of the reduced pencil's
+        // bound, so with more than one worker it runs on a helper thread beside them.
+        PencilReduction reduction;
+        std::vector<Z> bound,reduced;
+        auto reduce=[&] {
+            reduction=reduce_pencil(e,f);
+            if(!reduction.trivial)reduced=identity_bound(reduction.E,reduction.F);
+        };
+        if(oracle_worker_count(requested,2)>1) {
+            std::exception_ptr helper_error;
+            {
+                std::jthread helper([&] {
+                    try {
+                        bound=identity_bound(e,f);
+                    }
+                    catch(...) {
+                        helper_error=std::current_exception();
+                    }
+                });
+                reduce();
+            }
+            if(helper_error)std::rethrow_exception(helper_error);
+        }
+        else {
+            bound=identity_bound(e,f);
+            reduce();
+        }
+        const auto factor=graded_factors(reduction);
+        const ZMatrix& re=reduction.E;
+        const ZMatrix& rf=reduction.F;
+        if(!reduction.trivial) {
+            for(std::size_t k=0;k<=n;++k) {
+                mpz_fdiv_q(bound[k].get_mpz_t(),bound[k].get_mpz_t(),factor[k].get_mpz_t());
+                if(reduced[k]<bound[k])bound[k]=reduced[k];
+            }
+        }
+        // |c'_m| <= b_m < M/2 once M > 2*max_m b_m; 61k >= bits(max b)+1 ensures it for k moduli.
         const std::size_t need_bits=bits(*std::max_element(bound.begin(),bound.end()))+1;
-        const bool diagonal_e=diagonal(e);
+        const bool diagonal_e=diagonal(re);
         CoefficientResult r;
+        r.bound_bits=need_bits-1;
+        r.reduced=!reduction.trivial;
         std::vector<Word> primes,residues;
         std::size_t proven_bits=0,next_prime=0;
         std::optional<Team> team;
@@ -1387,7 +1453,7 @@ namespace secular {
             std::vector<std::vector<Word>> found(batch.size());
             std::vector<unsigned char> usable(batch.size(),0);
             team->run(batch.size(),[&](std::size_t index,unsigned) {
-                usable[index]=modular_characteristic(e,f,diagonal_e,batch[index],found[index]);
+                usable[index]=modular_characteristic(re,rf,diagonal_e,batch[index],found[index]);
             });
             for(std::size_t index=0;index<batch.size();++index) {
                 if(!usable[index]) {
@@ -1398,7 +1464,8 @@ namespace secular {
                 residues.insert(residues.end(),found[index].begin(),found[index].end());
                 proven_bits+=61;
             }
-            // As in the oracle: that many skipped moduli above 2^61 prove det(E)=0.
+            // As in the oracle: that many skipped moduli above 2^61 prove det(E')=0, and with it
+            // det(E) = f_0 det(E') = 0.
             if(proven_bits<need_bits&&r.skipped_moduli*61>=bits(bound[0]))
                 throw std::invalid_argument("singular mass/leading matrix");
         }
@@ -1407,8 +1474,10 @@ namespace secular {
         r.coefficients.resize(n+1);
         team->run(n+1,[&](std::size_t k,unsigned) {
             r.coefficients[k]=crt.combine(residues.data()+k,n+1);
+            r.coefficients[k]*=factor[k];
         });
-        // q_0=det(E) is nonzero modulo every usable prime, so it cannot be zero; checked anyway.
+        // q_0=f_0 det(E') and det(E') is nonzero modulo every usable prime, so q_0 cannot be zero;
+        // checked anyway.
         if(r.coefficients.front()==0)throw std::logic_error("Chinese remaindering gave det(E)=0");
         for(const auto& c:r.coefficients)r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(c));
         return r;

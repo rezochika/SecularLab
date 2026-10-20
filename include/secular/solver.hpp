@@ -61,6 +61,10 @@ namespace secular {
         std::string coefficient_method="recurrence";
         std::size_t coefficient_moduli=0;
         unsigned crt_workers=0;
+        // Bits of the reduced-coefficient bound that set coefficient_moduli, and whether Chinese
+        // remaindering ran on a nontrivially reduced pencil.
+        std::size_t crt_bound_bits=0;
+        bool crt_reduced=false;
         // The positive content of q and the longest coefficient of q/content.
         Z coefficient_content=1;
         std::size_t primitive_coefficient_bits_max=0;

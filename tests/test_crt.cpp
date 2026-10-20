@@ -76,11 +76,48 @@ namespace {
             else check(crt.moduli==first.moduli&&crt.skipped_moduli==first.skipped_moduli,
                        "moduli depend on the worker count");
         }
-        // The combined residues are a proof the oracle accepts with the same primes.
+        // The oracle accepts the result. Unreduced, the combined residues are a proof it accepts with
+        // the same primes; reduced, the original pencil's bound needs at least as many, less one.
         const auto report=check_coefficients(p.e,p.f,first.coefficients,2);
-        check(report.verified&&(report.method=="bareiss"||report.moduli<=first.moduli+first.skipped_moduli),
-              "oracle rejected Chinese remaindering");
+        check(report.verified,"oracle rejected Chinese remaindering");
+        check(report.method=="bareiss"||(first.reduced?first.moduli<=report.moduli+1:
+              report.moduli<=first.moduli+first.skipped_moduli),"oracle and Chinese remaindering moduli");
+        check(first.bound_bits+1<=61*first.moduli&&61*(first.moduli-1)<first.bound_bits+1,"bound sets the moduli");
+        check(first.reduced==!reduce_pencil(p.e,p.f).trivial,"reduction flag");
         return first;
+    }
+    // L*D*A*D with D=diag(2^x_i 5^y_i): the decimal structure that denominator clearing creates.
+    Pencil decimal_pencil(const Pencil& p,unsigned long e_factor,unsigned long f_factor) {
+        const auto n=p.e.n;
+        std::vector<Z> d(n);
+        for(auto& v:d) {
+            Z two,five;
+            mpz_ui_pow_ui(two.get_mpz_t(),2,static_cast<unsigned long>(generator()%9));
+            mpz_ui_pow_ui(five.get_mpz_t(),5,static_cast<unsigned long>(generator()%7));
+            v=two*five;
+        }
+        Pencil out=p;
+        for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j) {
+            out.e(i,j)*=d[i]*d[j]*e_factor;
+            out.f(i,j)*=d[i]*d[j]*f_factor;
+        }
+        return out;
+    }
+    // Chinese remaindering of a reducible pencil: the moduli follow the reduced bound, at most the
+    // original pencil's oracle needs, and never more than the reduced pencil's own bound asks for.
+    CoefficientResult reduced_route(const Pencil& p) {
+        const auto crt=crt_matches_recurrence(p);
+        const auto reduction=reduce_pencil(p.e,p.f);
+        check(crt.reduced&&!reduction.trivial,"decimal pencil was not reduced");
+        const auto oracle=check_coefficients(p.e,p.f,crt.coefficients,1);
+        check(oracle.verified&&oracle.method=="modular"&&crt.moduli<=oracle.moduli,"reduction added moduli");
+        // b_k <= B'_k: the reduced pencil passed directly, when irreducible, uses B'_k alone.
+        if(reduce_pencil(reduction.E,reduction.F).trivial) {
+            const auto direct=crt_characteristic(reduction.E,reduction.F,2);
+            check(!direct.reduced&&crt.bound_bits<=direct.bound_bits&&crt.moduli<=direct.moduli,
+                  "the per-coefficient bound exceeds the reduced pencil's bound");
+        }
+        return crt;
     }
     QMatrix rational(const ZMatrix& a,const Q& scale) {
         QMatrix q(a.n);
@@ -144,6 +181,34 @@ int main() {
             check(determinant(general.e)==p0,"constructed det(E)");
             const auto general_skip=crt_matches_recurrence(general);
             check(general_skip.skipped_moduli==1,"general E skipped modulus");
+        }
+        // Decimal-shaped pencils run on the reduced pencil E' = P^-1 E P^-1/alpha, F' = P^-1 F P^-1/beta
+        // and map back by q_k = f_k c'_k, for every structure and worker count.
+        for(std::size_t n:{1u,2u,3u,7u,12u}) {
+            for(unsigned width:{3u,90u}) {
+                reduced_route(decimal_pencil(random_pencil(n,true,true,true,width,35),1000,40));
+                reduced_route(decimal_pencil(random_pencil(n,false,true,true,width,60),50,8));
+                reduced_route(decimal_pencil(random_pencil(n,true,false,true,width,60),25,1));
+                reduced_route(decimal_pencil(random_pencil(n,false,false,false,width,60),1,10));
+            }
+        }
+        {
+            // Long 2-adic and 5-adic factors: far fewer moduli than the original pencil's oracle.
+            const auto big=decimal_pencil(random_pencil(12,true,true,true,8,100),1000000000,10000000);
+            const auto crt=reduced_route(big);
+            check(3*crt.moduli<check_coefficients(big.e,big.f,crt.coefficients,1).moduli,"reduction saved few moduli");
+            // Moduli dividing det(E') are skipped: det(E) = p0 * (powers of 2 and 5) * (short factors).
+            auto divisible=decimal_pencil(random_pencil(4,true,true,true,20,100),100,1);
+            divisible.e(0,0)*=word(oracle_prime(0));
+            check(reduced_route(divisible).skipped_moduli==1,"reduced pencil skipped moduli");
+            // A singular E stays singular after the reduction and is rejected.
+            ZMatrix singular(2),f(2);
+            singular(0,0)=singular(0,1)=singular(1,0)=singular(1,1)=400;
+            f(0,0)=200; f(0,1)=f(1,0)=-100; f(1,1)=500;
+            check(!reduce_pencil(singular,f).trivial,"singular decimal pencil was not reduced");
+            invalid([&] {
+                crt_characteristic(singular,f,2);
+            },"reduced singular E accepted");
         }
         // A singular E over the integers: every modulus is skipped until the bound proves
         // det(E)=0, and the request fails as the recurrence does.

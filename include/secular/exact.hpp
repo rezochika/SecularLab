@@ -127,20 +127,25 @@ namespace secular {
         // Threads that computed the rows of each recurrence stage, or the residues of crt_characteristic.
         unsigned workers {};
         // crt_characteristic only: primes whose residues were combined, and primes skipped
-        // because they divide det(E).
-        std::size_t moduli {},skipped_moduli {};
+        // because they divide det(E'); the bits of the coefficient bound that set their number,
+        // and whether the pencil was reduced (E' != E).
+        std::size_t moduli {},skipped_moduli {},bound_bits {};
+        bool reduced {};
     };
     // Workers as for oracle_worker_count, clamped to the n rows of a stage.
     // Every worker count gives identical results.
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
-    // det(zE-F) by Chinese remaindering the residues that the modular oracle computes: det(E)
-    // det(zI-E^-1 F) modulo oracle primes not dividing det(E), until their product M exceeds twice
-    // every coefficient bound B_m. The symmetric residue modulo M is then the coefficient itself,
-    // so the result is proven as the oracle proves a given vector. The same integers as
-    // characteristic(); no recurrence statistic is filled. Throws std::invalid_argument for a
-    // singular E, as characteristic() does, once the skipped primes prove det(E)=0. Workers as for
-    // oracle_worker_count, clamped to the first batch of primes. Requires the modular oracle
-    // (64-bit GMP limbs and 128-bit integers); otherwise throws std::logic_error.
+    // det(zE-F) by Chinese remaindering the residues that the modular oracle computes, taken on the
+    // reduce_pencil() reduction (E',F'): det(E') det(zI-E'^-1 F') modulo oracle primes not dividing
+    // det(E'), until their product M exceeds twice every bound b_m on the reduced coefficients c'_m.
+    // b_m is the smaller of the reduced pencil's coefficient bound and floor(B_m/f_m), with B_m the
+    // bound of the original pencil and q_m = f_m c'_m. The symmetric residue modulo M is then c'_m
+    // itself, so the result is proven as the oracle proves a given vector, and q_m = f_m c'_m by
+    // exact multiplication. The same integers as characteristic(); no recurrence statistic is
+    // filled. Throws std::invalid_argument for a singular E, as characteristic() does, once the
+    // skipped primes prove det(E')=0. Workers as for oracle_worker_count, clamped to the first
+    // batch of primes. Requires the modular oracle (64-bit GMP limbs and 128-bit integers);
+    // otherwise throws std::logic_error.
     CoefficientResult crt_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
     // The positive gcd of the coefficients, 1 for a zero vector. q/content has the same roots,
     // and the same signs everywhere.

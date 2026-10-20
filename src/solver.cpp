@@ -472,10 +472,13 @@ namespace secular {
                 out.crt_seconds=elapsed(crt_timer);
                 if(recurrence&&remaindered.coefficients!=c.coefficients)
                     throw std::logic_error("N-version coefficient check failed: the recurrence and Chinese remaindering differ");
-                // Residues modulo primes whose product exceeds twice every coefficient bound prove
-                // q = det(zE-F), as they prove a given vector in the modular oracle.
+                // Residues of the reduced pencil modulo primes whose product exceeds twice every bound
+                // on its coefficients prove them, as they prove a given vector in the modular oracle;
+                // q = det(zE-F) follows by the exact graded map back.
                 out.coefficient_moduli=remaindered.moduli;
                 out.crt_workers=remaindered.workers;
+                out.crt_bound_bits=remaindered.bound_bits;
+                out.crt_reduced=remaindered.reduced;
                 out.coefficient_identity_verified=true;
                 out.coefficient_oracle="crt";
                 out.oracle_moduli=remaindered.moduli;
@@ -957,6 +960,8 @@ namespace secular {
            <<"  \"coefficient_method\": \""<<r.coefficient_method<<"\",\n"
            <<"  \"coefficient_moduli\": "<<r.coefficient_moduli<<",\n"
            <<"  \"crt_workers\": "<<r.crt_workers<<",\n"
+           <<"  \"crt_bound_bits\": "<<r.crt_bound_bits<<",\n"
+           <<"  \"crt_reduced\": "<<(r.crt_reduced?"true":"false")<<",\n"
            <<"  \"coefficient_content_bits\": "<<bits(r.coefficient_content)<<",\n"
            <<"  \"primitive_coefficient_bits_max\": "<<r.primitive_coefficient_bits_max<<",\n"
            <<"  \"content_removed\": "<<(r.content_removed?"true":"false")<<",\n"
