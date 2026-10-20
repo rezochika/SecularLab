@@ -48,11 +48,12 @@ the jobs of each phase and also bounds peak memory; under CPU quotas or job limi
 pass the quota. Results never depend on it.
 --no-coefficient-check forces solve to use inertia and is forbidden for verify.
 Coefficients come from the adjugate recurrence by default. crt instead Chinese-
-remainders the oracle's residues modulo proven primes whose product exceeds twice
-every coefficient bound, which proves them by itself (--oracle bareiss adds the
-Bareiss check); both runs the two and requires identical integers. Neither
-allows --no-coefficient-check or formal affine input. --remove-content runs the
-Graeffe, squarefree and sign stages on q/content(q); coefficients.tsv keeps q.
+remainders the oracle's residues of the 2-adic/5-adic-reduced pencil modulo proven
+primes whose product exceeds twice every reduced-coefficient bound, which proves
+them by itself (--oracle bareiss adds the Bareiss check); both runs the two and
+requires identical integers. Neither allows --no-coefficient-check or formal
+affine input. --remove-content runs the Graeffe, squarefree and sign stages on
+q/content(q); coefficients.tsv keeps q.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum
 or invalid certificate; exit 2: invalid input, resource or I/O error.
