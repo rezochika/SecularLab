@@ -623,7 +623,8 @@ namespace secular {
         // the kernel reads it writes first for the current modulus. Three n x n arrays: B; the factor
         // L of E in l and U in hc, both dead once B is formed; then H in hc and its L in l, which the
         // determinant recurrence reuses for the polynomials. The symmetric routes keep S (or C) in b,
-        // the congruence its L in l and X in hc; Lanczos needs O(n) more.
+        // the congruence its L in l and X in hc, the factored route L in l and L^T in hc; Lanczos needs
+        // O(n) more.
         struct ResidueWorkspace {
             std::vector<Word> b,hc,l,factor,inverse,y,v,w,g,values,u,lanczos,poly,s;
             std::vector<std::size_t> row,first,column_first,last;
@@ -633,17 +634,19 @@ namespace secular {
         };
         // How the residues of one pencil are formed, decided once per pencil (residue_plan). general:
         // B = (E^-1 F)^T, its Hessenberg form and the determinant recurrence. With E and F symmetric,
-        // lanczos (E diagonal) runs Lanczos on (E, F), and congruence (E not diagonal) first reduces
-        // the pencil to (D, L^-1 F L^-T) by E = L D L^T; both fall back to the Hessenberg form.
+        // lanczos (E diagonal) runs Lanczos on (E, F); for E not diagonal, E = L D L^T, and congruence
+        // reduces the pencil to (D, L^-1 F L^-T) for Lanczos, while factored runs Lanczos on (E, F) with
+        // E^-1 applied by solves with L, D and L^T. All fall back to the Hessenberg form.
         struct ResiduePlan {
             enum class Route {
-                general,lanczos,congruence
+                general,lanczos,congruence,factored
             } route=Route::general;
             bool diagonal_e=false;
-            // lanczos: row i of F is zero outside the columns [first[i], last[i]), and when that range
-            // is mostly zeros, its nonzeros are columns column[start[i]..start[i+1]) (sparse). congruence:
-            // row i of E is zero left of column first[i] <= i.
-            std::vector<std::size_t> first,last,start;
+            // lanczos, factored: row i of F is zero outside the columns [first[i], last[i]), and when
+            // that range is mostly zeros, its nonzeros are columns column[start[i]..start[i+1]) (sparse).
+            // congruence, factored: row i of E (and of L) is zero left of column profile[i] <= i, so
+            // column i of L is zero below row reach[i]-1 >= i.
+            std::vector<std::size_t> first,last,start,profile,reach;
             std::vector<std::uint32_t> column;
             bool sparse=false;
         };
@@ -939,16 +942,52 @@ namespace secular {
             chi.resize(n+1);
             for(std::size_t t=0;t<=n;++t)chi[t]=poly[(n-t)*stride+n];
         }
+        // The start u_0 of Lanczos, a fixed pseudo-random vector (splitmix64). The helpers shared by the
+        // routes are inlined: as calls they cost the congruence route 2-5% a prime (code placement).
+        [[gnu::always_inline]] inline void lanczos_start(std::size_t n,const Montgomery& m,Word* u) {
+            std::uint64_t state=0;
+            for(std::size_t i=0;i<n;++i) {
+                std::uint64_t z=state+=0x9e3779b97f4a7c15;
+                z=(z^(z>>30))*0xbf58476d1ce4e5b9;
+                z=(z^(z>>27))*0x94d049bb133111eb;
+                u[i]=(z^(z>>31))%m.p;
+            }
+        }
+        // det(zI-T) in descending powers for T tridiagonal with subdiagonal 1, diagonal alpha and
+        // superdiagonal beta_1..beta_(n-1): p_(k+1) = (z-alpha_k) p_k - beta_k p_(k-1), O(n^2).
+        [[gnu::always_inline]] inline void tridiagonal_characteristic(std::size_t n,const Montgomery& m,const Word* alpha,
+                                                                      const Word* beta,ResidueWorkspace& ws,std::vector<Word>& chi) {
+            // p_k in ascending powers; a buffer reused for p_(k+1) held p_(k-2), so it is zero above k-2.
+            auto& poly=ws.poly;
+            poly.assign(3*(n+1),0);
+            Word* p0=poly.data();
+            Word* p1=p0+n+1;
+            Word* p2=p1+n+1;
+            const Word one=m.to(1);
+            p1[0]=one;
+            for(std::size_t k=0;k<n;++k) {
+                const Word a=alpha[k],b=beta[k];
+                p2[0]=m.sub(0,m.reduce(Wide(a)*p1[0]+Wide(b)*p0[0]));
+                for(std::size_t d=1;d<=k;++d)p2[d]=m.sub(p1[d-1],m.reduce(Wide(a)*p1[d]+Wide(b)*p0[d]));
+                p2[k+1]=one;
+                Word* old=p0;
+                p0=p1;
+                p1=p2;
+                p2=old;
+            }
+            chi.resize(n+1);
+            for(std::size_t k=0;k<=n;++k)chi[k]=p1[n-k];
+        }
         // det(zI-D^-1 S) for D = diag(d) and S symmetric, in descending powers, from 1/d (inverse_d) and
         // w = S q (product): Lanczos in the inner product <x,y> = x^T D y, for which D^-1 S is
         // self-adjoint. From u_0 and q_0 = D^-1 u_0, q_(k+1) = D^-1 S q_k - alpha_k q_k - beta_k q_(k-1)
         // with delta_k = <q_k,q_k>, alpha_k = q_k^T S q_k/delta_k and beta_k = delta_k/delta_(k-1), and
         // u_k = D q_k satisfies the same recurrence with S q_k in place of D^-1 S q_k. Over any field the
         // q_k are pairwise D-orthogonal while every delta is nonzero, so q_0..q_(n-1) are a basis in which
-        // D^-1 S is tridiagonal with subdiagonal 1, diagonal alpha and superdiagonal beta_1..beta_(n-1):
-        // p_(k+1) = (z-alpha_k) p_k - beta_k p_(k-1). False when a delta_k vanishes, the exact breakdown:
-        // q_k = 0 (the Krylov space of u_0 is a proper invariant subspace) or q_k isotropic. Per step one
-        // product with S, two dot products of length n and 3n products.
+        // D^-1 S is tridiagonal with subdiagonal 1, diagonal alpha and superdiagonal beta_1..beta_(n-1)
+        // (tridiagonal_characteristic). False when a delta_k vanishes, the exact breakdown: q_k = 0 (the
+        // Krylov space of u_0 is a proper invariant subspace) or q_k isotropic. Per step one product
+        // with S, two dot products of length n and 3n products.
         template<class Product> bool lanczos(std::size_t n,const Montgomery& m,const Word* inverse_d,Product&& product,
                                              ResidueWorkspace& ws,std::vector<Word>& chi) {
             auto& t=ws.lanczos;
@@ -960,13 +999,9 @@ namespace secular {
             Word* w=u0+n;
             Word* alpha=w+n;
             Word* beta=alpha+n;
-            // u_0 is a fixed pseudo-random vector (splitmix64); q_(-1) = u_(-1) = 0.
-            std::uint64_t state=0;
+            // q_(-1) = u_(-1) = 0.
+            lanczos_start(n,m,u);
             for(std::size_t i=0;i<n;++i) {
-                std::uint64_t z=state+=0x9e3779b97f4a7c15;
-                z=(z^(z>>30))*0xbf58476d1ce4e5b9;
-                z=(z^(z>>27))*0x94d049bb133111eb;
-                u[i]=(z^(z>>31))%m.p;
                 q[i]=m.mul(inverse_d[i],u[i]);
                 q0[i]=u0[i]=0;
             }
@@ -990,48 +1025,83 @@ namespace secular {
                 std::swap(q,q0);
                 std::swap(u,u0);
             }
-            // p_k in ascending powers; a buffer reused for p_(k+1) held p_(k-2), so it is zero above k-2.
-            auto& poly=ws.poly;
-            poly.assign(3*(n+1),0);
-            Word* p0=poly.data();
-            Word* p1=p0+n+1;
-            Word* p2=p1+n+1;
-            const Word one=m.to(1);
-            p1[0]=one;
-            for(std::size_t k=0;k<n;++k) {
-                const Word a=alpha[k],b=beta[k];
-                p2[0]=m.sub(0,m.reduce(Wide(a)*p1[0]+Wide(b)*p0[0]));
-                for(std::size_t d=1;d<=k;++d)p2[d]=m.sub(p1[d-1],m.reduce(Wide(a)*p1[d]+Wide(b)*p0[d]));
-                p2[k+1]=one;
-                Word* old=p0;
-                p0=p1;
-                p1=p2;
-                p2=old;
-            }
-            chi.resize(n+1);
-            for(std::size_t k=0;k<=n;++k)chi[k]=p1[n-k];
+            tridiagonal_characteristic(n,m,alpha,beta,ws,chi);
             return true;
         }
-        // E = L D L^T without pivoting (L unit lower triangular, row-major in ws.l; d in ws.factor, 1/d in
-        // ws.inverse) and the congruence C = L^-1 F L^-T into ws.b (symmetric, all of it): det(zE-F) =
-        // det(zD-C). L keeps the leading zeros of the rows of E (the plan's first), and every product but
-        // the n^2/2 divisions by pivots is part of a dot product: W = L D row by row (n^3/6), the upper
-        // triangle of X = L^-1 F (n^3/6, column-major in ws.hc), then the lower triangle of C = L^-1 X^T
-        // column by column, its upper part copied from the columns before (n^3/3). False when a pivot
-        // vanishes, whether or not p divides det(E).
-        bool symmetric_congruence(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,const Montgomery& m,
-                                  ResidueWorkspace& ws,Word& det_e) {
+        // lanczos() with E = L D L^T (symmetric_factor) in place of D: q = E^-1 u solves L y = u row by
+        // row as u is formed, then L^T q = D^-1 y from the last row up. Row i of L is
+        // ws.l[i*n+profile[i]..i*n+i), row i of L^T (column i of L) lt[i*n+i+1..i*n+reach[i]); w = S q
+        // row by row (row(i, q)). Per step one product with S, one product with each of L and L^T, two
+        // dot products of length n and 3n products. Each substitution is a chain of dependent rows, about
+        // 4 ns a row when L's rows are short.
+        template<class Row> bool factored_lanczos(std::size_t n,const Montgomery& m,const ResiduePlan& plan,const Word* lt,
+                                                  Row&& row,ResidueWorkspace& ws,std::vector<Word>& chi) {
+            const std::size_t* profile=plan.profile.data();
+            const std::size_t* reach=plan.reach.data();
+            const Word* l=ws.l.data();
+            const Word* inverse_d=ws.inverse.data();
+            auto& t=ws.lanczos;
+            t.resize(7*n);
+            Word* q=t.data();
+            Word* q0=q+n;
+            Word* u=q0+n;
+            Word* u0=u+n;
+            Word* w=u0+n;
+            Word* alpha=w+n;
+            Word* beta=alpha+n;
+            // x = E^-1 x in place, the rows of L y = x already done.
+            auto back=[&](Word* x) {
+                for(std::size_t i=n;i-->0;) {
+                    const Word z=m.mul(x[i],inverse_d[i]);
+                    x[i]=reach[i]>i+1?m.sub(z,m.dot(lt+i*n+i+1,x+i+1,reach[i]-i-1)):z;
+                }
+            };
+            // q_(-1) = u_(-1) = 0.
+            lanczos_start(n,m,u);
+            for(std::size_t i=0;i<n;++i) {
+                const auto s=profile[i];
+                q[i]=s<i?m.sub(u[i],m.dot(l+i*n+s,q+s,i-s)):u[i];
+                q0[i]=u0[i]=0;
+            }
+            back(q);
+            Word previous=0;
+            for(std::size_t k=0;k<n;++k) {
+                const Word delta=m.dot(q,u,n);
+                if(delta==0)return false;
+                for(std::size_t i=0;i<n;++i)w[i]=row(i,q);
+                const Word inverse=m.inverse(delta);
+                alpha[k]=m.mul(m.dot(w,q,n),inverse);
+                beta[k]=k?m.mul(delta,previous):0;
+                previous=inverse;
+                if(k+1==n)break;
+                const Word a=alpha[k],b=beta[k];
+                for(std::size_t i=0;i<n;++i) {
+                    const Word next=m.sub(w[i],m.reduce(Wide(a)*u[i]+Wide(b)*u0[i]));
+                    u0[i]=next;
+                    const auto s=profile[i];
+                    q0[i]=s<i?m.sub(next,m.dot(l+i*n+s,q0+s,i-s)):next;
+                }
+                back(q0);
+                std::swap(q,q0);
+                std::swap(u,u0);
+            }
+            tridiagonal_characteristic(n,m,alpha,beta,ws,chi);
+            return true;
+        }
+        // E = L D L^T without pivoting: L unit lower triangular, row-major in ws.l, d in ws.factor, 1/d in
+        // ws.inverse, det(E) = d_0...d_(n-1). L keeps the leading zeros of the rows of E (the plan's
+        // profile), and W = L D is formed row by row with every product but the divisions by pivots part
+        // of a dot product (n^3/6 for a dense E). False when a pivot vanishes, whether or not p divides
+        // det(E).
+        [[gnu::always_inline]] inline bool symmetric_factor(const ZMatrix& e,const ResiduePlan& plan,const Montgomery& m,
+                                                            ResidueWorkspace& ws,Word& det_e) {
             const auto n=e.n;
-            const auto& first=plan.first;
+            const auto& first=plan.profile;
             auto& l=ws.l;
-            auto& x=ws.hc;
-            auto& c=ws.b;
             auto& d=ws.factor;
             auto& inverse=ws.inverse;
             auto& w=ws.w;
             l.resize(n*n);
-            x.resize(n*n);
-            c.resize(n*n);
             d.resize(n);
             inverse.resize(n);
             w.resize(n);
@@ -1052,6 +1122,43 @@ namespace secular {
                 det_e=m.mul(det_e,d[i]);
                 inverse[i]=m.inverse(d[i]);
             }
+            return true;
+        }
+        // The rows' nonzero ranges [ws.first[i], ws.last[i]) of C in ws.b, and their total length. C is
+        // dense unless E^-1 is sparse (E block diagonal) or F = L Lambda L^T (C diagonal).
+        std::size_t congruence_ranges(std::size_t n,ResidueWorkspace& ws) {
+            const auto& c=ws.b;
+            auto& first=ws.first;
+            auto& last=ws.last;
+            first.resize(n);
+            last.resize(n);
+            std::size_t terms=0;
+            for(std::size_t i=0;i<n;++i) {
+                const Word* ci=&c[i*n];
+                std::size_t a=0,b=n;
+                while(a<i&&ci[a]==0)++a;
+                while(b>i+1&&ci[b-1]==0)--b;
+                first[i]=a;
+                last[i]=b;
+                terms+=b-a;
+            }
+            return terms;
+        }
+        // E = L D L^T (symmetric_factor) and the congruence C = L^-1 F L^-T into ws.b (symmetric, all of
+        // it): det(zE-F) = det(zD-C). The upper triangle of X = L^-1 F (n^3/6, column-major in ws.hc),
+        // then the lower triangle of C = L^-1 X^T column by column, its upper part copied from the
+        // columns before (n^3/3), all in dot products that skip L's leading zeros. False when a pivot
+        // vanishes.
+        bool symmetric_congruence(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,const Montgomery& m,
+                                  ResidueWorkspace& ws,Word& det_e) {
+            if(!symmetric_factor(e,plan,m,ws,det_e))return false;
+            const auto n=e.n;
+            const auto& first=plan.profile;
+            const auto& l=ws.l;
+            auto& x=ws.hc;
+            auto& c=ws.b;
+            x.resize(n*n);
+            c.resize(n*n);
             // X_ji = F_ji - sum_(t<j) L_jt X_ti for i >= j: x[i*n+t] = X_ti.
             for(std::size_t j=0;j<n;++j) {
                 const auto fj=first[j];
@@ -1072,11 +1179,43 @@ namespace secular {
             }
             return true;
         }
+        // Runs `run` with row(i, v), row i of F v for a symmetric F: a dot product with v over the plan's
+        // range of row i, from F's lower triangle converted and mirrored into ws.b (zero past the
+        // diagonal where only a later row's range reaches), or over the row's nonzeros alone (sparse,
+        // their values in ws.s).
+        template<class Run> bool symmetric_product(const ZMatrix& f,const ResiduePlan& plan,const Montgomery& m,
+                                                   ResidueWorkspace& ws,Run&& run) {
+            const auto n=f.n;
+            const auto& first=plan.first;
+            const auto& last=plan.last;
+            if(plan.sparse) {
+                const auto& start=plan.start;
+                const auto* column=plan.column.data();
+                auto& values=ws.s;
+                values.resize(plan.column.size());
+                for(std::size_t i=0;i<n;++i)
+                    for(std::size_t t=start[i];t<start[i+1];++t)values[t]=scaled_residue(f(i,column[t]),m.r2,m);
+                const Word* value=values.data();
+                return run([&](std::size_t i,const Word* v) {
+                    return m.dot(v,column+start[i],value+start[i],start[i+1]-start[i]);
+                });
+            }
+            auto& s=ws.b;
+            s.resize(n*n);
+            for(std::size_t i=0;i<n;++i) {
+                std::fill(s.begin()+static_cast<std::ptrdiff_t>(i*n+i+1),s.begin()+static_cast<std::ptrdiff_t>(i*n+last[i]),0);
+                for(std::size_t j=first[i];j<=i;++j)s[i*n+j]=s[j*n+i]=scaled_residue(f(i,j),m.r2,m);
+            }
+            return run([&](std::size_t i,const Word* v) {
+                return m.dot(&s[i*n+first[i]],v+first[i],last[i]-first[i]);
+            });
+        }
         // The work of one modulus, shared by the oracle and Chinese remaindering: the same residues
         // as reference_characteristic. The general route forms B = (E^-1 F)^T, its Hessenberg form and
-        // the determinant recurrence; the symmetric routes of the plan reach a pencil (D, S), D diagonal
-        // and S symmetric, and run Lanczos on it. A zero LDL^T pivot falls back to the general route, a
-        // Lanczos breakdown to the Hessenberg form of D^-1 S.
+        // the determinant recurrence; the symmetric routes of the plan run Lanczos on (E, F), on (D, C)
+        // after the congruence, or on (E, F) through the factor of E. A zero LDL^T pivot falls back to
+        // the general route, a Lanczos breakdown to the Hessenberg form of D^-1 C after the congruence
+        // and to the general route otherwise.
         bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,Word p,std::vector<Word>& q,
                                     ResidueWorkspace& ws) {
             using Route=ResiduePlan::Route;
@@ -1103,32 +1242,11 @@ namespace secular {
                     all=m.mul(all,d[i]);
                 }
                 inverse[0]=all;
-                const auto& first=plan.first;
-                const auto& last=plan.last;
-                bool done=false;
-                if(plan.sparse) {
-                    const auto& start=plan.start;
-                    const auto* column=plan.column.data();
-                    auto& values=ws.s;
-                    values.resize(plan.column.size());
-                    for(std::size_t i=0;i<n;++i)
-                        for(std::size_t t=start[i];t<start[i+1];++t)values[t]=scaled_residue(f(i,column[t]),m.r2,m);
-                    done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
-                        for(std::size_t i=0;i<n;++i)out[i]=m.dot(v,column+start[i],values.data()+start[i],start[i+1]-start[i]);
+                const bool done=symmetric_product(f,plan,m,ws,[&](auto&& row) {
+                    return lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
+                        for(std::size_t i=0;i<n;++i)out[i]=row(i,v);
                     },ws,q);
-                }
-                else {
-                    // Row i past the diagonal is zero unless a later row's range reaches column i.
-                    auto& s=ws.b;
-                    s.resize(n*n);
-                    for(std::size_t i=0;i<n;++i) {
-                        std::fill(s.begin()+static_cast<std::ptrdiff_t>(i*n+i+1),s.begin()+static_cast<std::ptrdiff_t>(i*n+last[i]),0);
-                        for(std::size_t j=first[i];j<=i;++j)s[i*n+j]=s[j*n+i]=scaled_residue(f(i,j),m.r2,m);
-                    }
-                    done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
-                        for(std::size_t i=0;i<n;++i)out[i]=m.dot(&s[i*n+first[i]],v+first[i],last[i]-first[i]);
-                    },ws,q);
-                }
+                });
                 if(done) {
                     ++ws.routes.lanczos;
                     for(auto& c:q)c=m.from(m.mul(det_e,c));
@@ -1136,23 +1254,34 @@ namespace secular {
                 }
                 ++ws.routes.breakdown_fallbacks;
             }
+            else if(plan.route==Route::factored) {
+                if(symmetric_factor(e,plan,m,ws,det_e)) {
+                    // L^T row-major, row i over columns i+1..reach[i]-1, zero where i is left of a row's profile.
+                    const auto& profile=plan.profile;
+                    const auto& reach=plan.reach;
+                    const auto& l=ws.l;
+                    auto& lt=ws.hc;
+                    lt.resize(n*n);
+                    for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<reach[i];++j)lt[i*n+j]=profile[j]<=i?l[j*n+i]:0;
+                    const bool done=symmetric_product(f,plan,m,ws,[&](auto&& row) {
+                        return factored_lanczos(n,m,plan,lt.data(),row,ws,q);
+                    });
+                    if(done) {
+                        ++ws.routes.factored;
+                        for(auto& c:q)c=m.from(m.mul(det_e,c));
+                        return true;
+                    }
+                    ++ws.routes.breakdown_fallbacks;
+                }
+                else ++ws.routes.pivot_fallbacks;
+            }
             else if(plan.route==Route::congruence) {
                 if(symmetric_congruence(e,f,plan,m,ws,det_e)) {
                     auto& c=ws.b;
                     const auto& inverse=ws.inverse;
-                    // C is dense unless E^-1 is sparse (E block diagonal): its rows' nonzero ranges.
-                    auto& first=ws.first;
-                    auto& last=ws.last;
-                    first.resize(n);
-                    last.resize(n);
-                    for(std::size_t i=0;i<n;++i) {
-                        const Word* ci=&c[i*n];
-                        std::size_t a=0,b=n;
-                        while(a<i&&ci[a]==0)++a;
-                        while(b>i+1&&ci[b-1]==0)--b;
-                        first[i]=a;
-                        last[i]=b;
-                    }
+                    const auto& first=ws.first;
+                    const auto& last=ws.last;
+                    congruence_ranges(n,ws);
                     const bool done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
                         for(std::size_t i=0;i<n;++i)out[i]=m.dot(&c[i*n+first[i]],v+first[i],last[i]-first[i]);
                     },ws,q);
@@ -1206,47 +1335,96 @@ namespace secular {
             }
             return work;
         }
-        // The route of a pencil: general unless E and F are symmetric; congruence for E not diagonal;
-        // for E diagonal Lanczos, except that the fast kernel keeps the general route for a tridiagonal F
-        // and when one modulus shows it cheaper (general_work against an estimate of Lanczos).
+        // The terms of one product with C = L^-1 F L^-T on its rows' ranges as the congruence route
+        // forms C modulo p; nullopt when an LDL^T pivot vanishes.
+        std::optional<std::size_t> congruence_terms(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,Word p) {
+            const Montgomery m(p);
+            ResidueWorkspace ws;
+            Word det_e=0;
+            if(!symmetric_congruence(e,f,plan,m,ws,det_e))return std::nullopt;
+            return congruence_ranges(e.n,ws);
+        }
+        // The route of a pencil: general unless E and F are symmetric; for E not diagonal congruence,
+        // except that the fast kernel takes the factored route when its Lanczos takes fewer terms than
+        // forming C and Lanczos on it (congruence_terms at one modulus); for E diagonal Lanczos, except
+        // that the fast kernel keeps the general route for a tridiagonal F and when one modulus shows it
+        // cheaper (general_work against an estimate of Lanczos).
         ResiduePlan residue_plan(const ZMatrix& e,const ZMatrix& f,ResidueKernel kernel) {
             ResiduePlan plan;
             plan.diagonal_e=diagonal(e);
             if(kernel==ResidueKernel::general||kernel==ResidueKernel::reference||!(plan.diagonal_e||symmetric(e))||!symmetric(f))
                 return plan;
             const auto n=e.n;
-            const ZMatrix& a=plan.diagonal_e?f:e;
             plan.first.resize(n);
             plan.last.resize(n);
-            for(std::size_t i=0;i<n;++i) {
-                std::size_t first=0,last=n;
-                while(first<i&&a(i,first)==0)++first;
-                while(last>i+1&&a(i,last-1)==0)--last;
-                plan.first[i]=first;
-                plan.last[i]=last;
-            }
-            if(!plan.diagonal_e) {
-                plan.route=ResiduePlan::Route::congruence;
-                return plan;
-            }
-            // A tridiagonal F makes B tridiagonal, already Hessenberg, with O(n^2) for its determinant.
             std::size_t range=0,nonzero=0;
             bool tridiagonal=true;
             for(std::size_t i=0;i<n;++i) {
-                range+=plan.last[i]-plan.first[i];
-                tridiagonal&=plan.first[i]+1>=i&&plan.last[i]<=i+2;
-                for(std::size_t j=plan.first[i];j<plan.last[i];++j)nonzero+=f(i,j)!=0;
+                std::size_t first=0,last=n;
+                while(first<i&&f(i,first)==0)++first;
+                while(last>i+1&&f(i,last-1)==0)--last;
+                plan.first[i]=first;
+                plan.last[i]=last;
+                range+=last-first;
+                tridiagonal&=first+1>=i&&last<=i+2;
+                for(std::size_t j=first;j<last;++j)nonzero+=f(i,j)!=0;
             }
-            if(kernel==ResidueKernel::fast&&tridiagonal)return plan;
-            plan.route=ResiduePlan::Route::lanczos;
             plan.sparse=2*nonzero<range;
-            if(plan.sparse) {
+            auto csr=[&] {
+                if(!plan.sparse)return;
                 plan.start.assign(1,0);
                 for(std::size_t i=0;i<n;++i) {
                     for(std::size_t j=plan.first[i];j<plan.last[i];++j)if(f(i,j)!=0)plan.column.push_back(static_cast<std::uint32_t>(j));
                     plan.start.push_back(plan.column.size());
                 }
+            };
+            if(!plan.diagonal_e) {
+                plan.profile.resize(n);
+                plan.reach.resize(n);
+                for(std::size_t i=0;i<n;++i) {
+                    std::size_t first=0;
+                    while(first<i&&e(i,first)==0)++first;
+                    plan.profile[i]=first;
+                    plan.reach[i]=i+1;
+                }
+                for(std::size_t j=0;j<n;++j)for(std::size_t t=plan.profile[j];t<j;++t)plan.reach[t]=j+1;
+                plan.route=ResiduePlan::Route::congruence;
+                if(kernel==ResidueKernel::symmetric)return plan;
+                // The factored route's Lanczos takes n products with F, L and L^T; the congruence forms X
+                // and C in (n+1) sum(i-profile[i]) dot-product terms and runs Lanczos on C's ranges, which
+                // only C itself shows: F = L Lambda L^T keeps C diagonal (cluster32, A-mid4), a generic band
+                // fills it. Per term the factored route measured 1.1 times the congruence; the overheads per
+                // row of a step and per entry of X and C came to about the same per n^2 (14.8 and 16.1 ns)
+                // and cancel. So a diagonal C (n terms) always favours the congruence, as F's ranges hold
+                // n terms and L^T's at least L's; unless a dense C (n^2) does too, one modulus forms C.
+                std::size_t lower=0,upper=0;
+                for(std::size_t i=0;i<n;++i) {
+                    lower+=i-plan.profile[i];
+                    upper+=plan.reach[i]-i-1;
+                }
+                const std::size_t factored_work=11*n*((plan.sparse?nonzero:range)+lower+upper);
+                auto congruence_work=[&](std::size_t terms) {
+                    return 10*((n+1)*lower+n*terms);
+                };
+                bool factored=kernel==ResidueKernel::factored;
+                if(!factored&&factored_work<congruence_work(n*n)) {
+                    for(std::size_t i=0;i<4;++i) {
+                        const auto terms=congruence_terms(e,f,plan,prime_at(i));
+                        if(!terms)continue;
+                        factored=factored_work<congruence_work(*terms);
+                        break;
+                    }
+                }
+                if(factored) {
+                    plan.route=ResiduePlan::Route::factored;
+                    csr();
+                }
+                return plan;
             }
+            // A tridiagonal F makes B tridiagonal, already Hessenberg, with O(n^2) for its determinant.
+            if(kernel==ResidueKernel::fast&&tridiagonal)return plan;
+            plan.route=ResiduePlan::Route::lanczos;
+            csr();
             // Lanczos costs n products with F of `terms` each, plus per step vector work and short-row
             // overheads worth about 20 n products. Rows mostly full make the general reduction dense at
             // once; otherwise one modulus measures the general route, whose Hessenberg form stays sparse
