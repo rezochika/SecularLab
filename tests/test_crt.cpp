@@ -3,6 +3,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <tuple>
 
 using namespace secular;
 
@@ -118,6 +119,47 @@ namespace {
                   "the per-coefficient bound exceeds the reduced pencil's bound");
         }
         return crt;
+    }
+    // The residue kernel against the reference kernel (Gauss-Jordan on [E | F], then the right-looking
+    // Hessenberg reduction) and against the exact coefficients modulo p. Small primes make zero pivots,
+    // pivoting swaps, zero subdiagonals and det(E) = 0 modulo p common; nullopt must mean p | det(E).
+    unsigned singular_moduli=0;
+    void kernels_agree(const ZMatrix& e,const ZMatrix& f,const std::vector<std::uint64_t>& primes) {
+        const auto fast=pencil_residues(e,f,primes);
+        const auto reference=pencil_residues(e,f,primes,ResidueKernel::reference);
+        check(fast==reference,"residue kernel differs from the reference kernel");
+        const Z det=determinant(e);
+        const auto exact=det!=0?characteristic(e,f).coefficients:std::vector<Z>{};
+        for(std::size_t i=0;i<primes.size();++i) {
+            const Z p=word(primes[i]);
+            Z r;
+            mpz_mod(r.get_mpz_t(),det.get_mpz_t(),p.get_mpz_t());
+            check(!fast[i]==(r==0),"residue kernel misjudged p | det(E)");
+            if(!fast[i]) {
+                ++singular_moduli;
+                continue;
+            }
+            check(fast[i]->size()==e.n+1,"residue count");
+            for(std::size_t k=0;k<exact.size();++k) {
+                mpz_mod(r.get_mpz_t(),exact[k].get_mpz_t(),p.get_mpz_t());
+                check(word((*fast[i])[k])==r,"residue differs from the exact coefficient");
+            }
+        }
+    }
+    // Dense general E, singular for some small primes and possibly over the integers.
+    ZMatrix general_matrix(std::size_t n,unsigned width) {
+        ZMatrix a(n);
+        for(auto& v:a.data)v=random_integer(width);
+        return a;
+    }
+    // Symmetric F supported on a band, on diagonal blocks, or on a tridiagonal (already Hessenberg).
+    ZMatrix structured_matrix(std::size_t n,std::size_t band,std::size_t block,unsigned width,unsigned density) {
+        ZMatrix a(n);
+        for(std::size_t i=0;i<n;++i)for(std::size_t j=i;j<n;++j) {
+            if(j-i>band||i/block!=j/block||(i!=j&&generator()%100>=density))continue;
+            a(i,j)=a(j,i)=random_integer(width);
+        }
+        return a;
     }
     QMatrix rational(const ZMatrix& a,const Q& scale) {
         QMatrix q(a.n);
@@ -237,6 +279,75 @@ int main() {
         invalid([] {
             crt_characteristic(identity<Z>(2),identity<Z>(2),65);
         },"excess workers accepted");
+
+        // The residue kernel gives the reference kernel's residues on every structure, for oracle,
+        // mid-size and small primes alike.
+        {
+            const std::vector<std::uint64_t> primes {3,5,7,11,13,101,65537,2147483647ULL,4294967291ULL,
+                                                     2305843009213693951ULL,oracle_prime(0),oracle_prime(1),oracle_prime(7)};
+            for(std::size_t n:{1u,2u,3u,4u,6u,9u,16u,24u}) {
+                for(unsigned width:{2u,40u}) {
+                    for(unsigned density:{100u,30u,8u}) {
+                        for(const auto& [diagonal_e,symmetric_e,symmetric_f]:std::vector<std::tuple<bool,bool,bool>>{
+                            {true,true,true},{false,true,true},{true,true,false},{false,false,false}}) {
+                            const auto p=random_pencil(n,diagonal_e,symmetric_e,symmetric_f,width,density);
+                            kernels_agree(p.e,p.f,primes);
+                        }
+                        kernels_agree(general_matrix(n,width),random_pencil(n,true,true,false,width,density).f,primes);
+                    }
+                    // Tridiagonal (already Hessenberg), 3 x 3 blocks (zero subdiagonals), a band that fills in,
+                    // and a banded F behind a dense E.
+                    const auto e=random_pencil(n,true,true,true,width,100).e;
+                    kernels_agree(e,structured_matrix(n,1,n,width,100),primes);
+                    kernels_agree(e,structured_matrix(n,n,3,width,100),primes);
+                    kernels_agree(e,structured_matrix(n,3,n,width,80),primes);
+                    kernels_agree(random_pencil(n,false,true,true,width,100).e,structured_matrix(n,2,n,width,100),primes);
+                }
+            }
+            // Larger sparse pencils: columns with several nonzeros below the subdiagonal, fill-in that
+            // ends the sparse reduction part way, and blocks; then dense F needing a pivoting swap.
+            for(unsigned density:{6u,15u,40u}) {
+                const auto p=random_pencil(48,true,true,true,2,density);
+                kernels_agree(p.e,p.f,primes);
+            }
+            const auto e48=random_pencil(48,true,true,true,2,100).e;
+            kernels_agree(e48,structured_matrix(48,4,48,2,100),primes);
+            kernels_agree(e48,structured_matrix(48,48,6,2,100),primes);
+            auto swap_needed=random_pencil(40,true,true,true,30,100);
+            swap_needed.f(0,1)=swap_needed.f(1,0)=0;
+            swap_needed.f(0,2)=swap_needed.f(2,0)=0;
+            kernels_agree(swap_needed.e,swap_needed.f,primes);
+            // Oracle primes dividing det(E): a diagonal E with E_00 = p0 p1, and a dense E = U^T D U with
+            // det(E) = p0.
+            const auto p0=oracle_prime(0),p1=oracle_prime(1);
+            auto divisible=random_pencil(5,true,true,true,20,100);
+            divisible.e(0,0)=word(p0)*word(p1);
+            kernels_agree(divisible.e,divisible.f,primes);
+            check(!pencil_residues(divisible.e,divisible.f,{p0})[0]&&!pencil_residues(divisible.e,divisible.f,{p1})[0]&&
+                  pencil_residues(divisible.e,divisible.f,{oracle_prime(2)})[0],"diagonal E divisible by oracle primes");
+            ZMatrix u=identity<Z>(6),d=identity<Z>(6);
+            for(std::size_t i=0;i<6;++i)for(std::size_t j=i+1;j<6;++j)u(i,j)=random_integer(12);
+            d(0,0)=word(p0);
+            const auto dense_divisible=multiply(transpose(u),multiply(d,u));
+            check(determinant(dense_divisible)==word(p0),"constructed dense det(E)");
+            kernels_agree(dense_divisible,random_pencil(6,true,true,true,30,100).f,primes);
+            check(!pencil_residues(dense_divisible,identity<Z>(6),{p0},ResidueKernel::reference)[0]&&
+                  !pencil_residues(dense_divisible,identity<Z>(6),{p0})[0],"dense E divisible by an oracle prime");
+            // E singular over the integers leaves no modulus usable.
+            auto singular=general_matrix(7,20);
+            for(std::size_t j=0;j<7;++j)singular(3,j)=singular(1,j)*2-singular(5,j);
+            kernels_agree(singular,general_matrix(7,20),primes);
+            check(singular_moduli>=primes.size()+3+20,"small primes rarely divided det(E)");
+            invalid([] {
+                pencil_residues(identity<Z>(2),identity<Z>(2),{9});
+            },"composite modulus accepted");
+            invalid([] {
+                pencil_residues(identity<Z>(2),identity<Z>(2),{2});
+            },"even modulus accepted");
+            invalid([] {
+                pencil_residues(identity<Z>(2),identity<Z>(2),{(std::uint64_t(1)<<62)+135});
+            },"modulus above 2^62 accepted");
+        }
 
         // Content: the positive gcd, one for a zero vector; a pencil 2E,6F has content >= 2^n.
         check(polynomial_content({6,-4,2})==2&&polynomial_content({-6})==6&&polynomial_content({0,0})==1,"content");

@@ -353,7 +353,7 @@ namespace secular {
         // Montgomery arithmetic modulo an odd p < 2^62. Values are residues below p
         // in Montgomery form, except the arguments of to() and results of from().
         struct Montgomery {
-            Word p,negative_inverse,r2;
+            Word p,negative_inverse,r2,r3;
             explicit Montgomery(Word modulus):p(modulus) {
                 Word inverse=modulus;
                 // Newton iteration doubles the correct low bits: 3, 6, ..., 96 >= 64.
@@ -361,6 +361,7 @@ namespace secular {
                 negative_inverse=0-inverse;
                 const Wide r=(Wide(1)<<64)%modulus;
                 r2=static_cast<Word>(r*r%modulus);
+                r3=mul(r2,r2);
             }
             Word reduce(Wide t)const {
                 const Word m=static_cast<Word>(t)*negative_inverse;
@@ -391,8 +392,78 @@ namespace secular {
                 }
                 return result;
             }
+            // For prime p and a = xR mod p nonzero: the extended Euclidean algorithm gives a^-1 mod p =
+            // x^-1 R^-1, and multiplying by R^3 (one product with R^3 R^-1) gives x^-1 R. The cofactors
+            // stay within p < 2^62 in magnitude, so their products with quotients fit in 63 bits.
             Word inverse(Word a)const {
-                return power(a,p-2);
+                Word r0=p,r1=a;
+                std::int64_t t0=0,t1=1;
+                while(r1) {
+                    const Word q=r0/r1,r=r0-q*r1;
+                    const std::int64_t t=t0-static_cast<std::int64_t>(q)*t1;
+                    r0=r1;
+                    r1=r;
+                    t0=t1;
+                    t1=t;
+                }
+                return mul(t0<0?static_cast<Word>(t0+static_cast<std::int64_t>(p)):static_cast<Word>(t0),r3);
+            }
+            // X R^-1 mod p for X = top 2^128 + low below 2^64 p^2, so top < p^2/2^64 < p: X R^-1 =
+            // (top 2^64 + high) + low R^-1, where (top 2^64 + high) R^-1 is one reduction, then times
+            // R^2 R^-1. Below p 2^64 a single reduction suffices.
+            Word reduce(Word top,Wide low)const {
+                if(top==0&&static_cast<Word>(low>>64)<p)return reduce(low);
+                const Word high=mul(reduce((Wide(top)<<64)|static_cast<Word>(low>>64)),r2);
+                return add(high,reduce(Wide(static_cast<Word>(low))));
+            }
+            // sum_i a_i b_i R^-1 mod p for fewer than 2^64 terms below p, so Montgomery forms give the
+            // Montgomery form of the dot product, with one reduction. Every product is below p^2 <
+            // 2^124, so sixteen of them fit in 128 bits; those sums go into a 192-bit total.
+            Word dot(const Word* a,const Word* b,std::size_t count)const {
+                Wide total=0;
+                Word top=0;
+                while(count) {
+                    const std::size_t chunk=count<16?count:16;
+                    Wide sum=0;
+                    for(std::size_t i=0;i<chunk;++i)sum+=Wide(a[i])*b[i];
+                    a+=chunk;
+                    b+=chunk;
+                    count-=chunk;
+                    total+=sum;
+                    top+=total<sum;
+                }
+                return reduce(top,total);
+            }
+            // sum_t a[index_t] b_t R^-1 mod p.
+            Word dot(const Word* a,const std::uint32_t* index,const Word* b,std::size_t count)const {
+                Wide total=0;
+                Word top=0;
+                while(count) {
+                    const std::size_t chunk=count<16?count:16;
+                    Wide sum=0;
+                    for(std::size_t i=0;i<chunk;++i)sum+=Wide(a[index[i]])*b[i];
+                    index+=chunk;
+                    b+=chunk;
+                    count-=chunk;
+                    total+=sum;
+                    top+=total<sum;
+                }
+                return reduce(top,total);
+            }
+            // Shoup multiplication by a fixed w < p: with w' = floor(w 2^64/p) and q = floor(w' x/2^64),
+            // 0 <= wx - qp < 2p for every x < 2^64. As w x R = (w x) R, it maps a Montgomery form to the
+            // Montgomery form of the product. From a = wR mod p, w = a R^-1 and, since w 2^64 = w' p + a,
+            // w' = a (-p^-1) mod 2^64.
+            struct Multiplier {
+                Word w,shoup;
+            };
+            Multiplier multiplier(Word a)const {
+                return {from(a),a*negative_inverse};
+            }
+            Word times(const Multiplier& u,Word x)const {
+                const Word q=static_cast<Word>((Wide(u.shoup)*x)>>64);
+                const Word r=u.w*x-q*p;
+                return r>=p?r-p:r;
             }
         };
         // Miller-Rabin with the first twelve prime bases (2..37) is deterministic below
@@ -438,9 +509,10 @@ namespace secular {
             const Word r=mpn_mod_1(mpz_limbs_read(z.get_mpz_t()),static_cast<mp_size_t>(size),p);
             return mpz_sgn(z.get_mpz_t())<0&&r?p-r:r;
         }
-        // A=E^-1 F over F_p in Montgomery form, and det(E) mod p. False if p divides det(E).
-        bool reduce_pencil(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,const Montgomery& m,
-                           std::vector<Word>& a,Word& det_e) {
+        // The reference kernel: A=E^-1 F over F_p in Montgomery form by Gauss-Jordan on [E | F],
+        // and det(E) mod p. False if p divides det(E).
+        bool reference_reduce(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,const Montgomery& m,
+                              std::vector<Word>& a,Word& det_e) {
             const auto n=e.n;
             a.resize(n*n);
             for(std::size_t i=0;i<a.size();++i)a[i]=m.to(residue(f.data[i],m.p));
@@ -488,7 +560,7 @@ namespace secular {
         }
         // det(zI-A) over F_p in descending powers: similarity reduction to upper Hessenberg
         // form, then the Hessenberg determinant recurrence. Exact over any field.
-        std::vector<Word> hessenberg_charpoly(std::vector<Word>& h,std::size_t n,const Montgomery& m) {
+        std::vector<Word> reference_hessenberg(std::vector<Word>& h,std::size_t n,const Montgomery& m) {
             auto at=[&](std::size_t i,std::size_t j)->Word& {
                 return h[i*n+j];
             };
@@ -535,17 +607,329 @@ namespace secular {
             }
             return {p[n].rbegin(),p[n].rend()};
         }
-        // The work of one modulus, shared by the oracle and Chinese remaindering: det(zE-F) modulo
-        // p as det(E) det(zI-E^-1 F), in descending powers, as plain residues below p. False when
-        // p divides det(E).
-        bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,Word p,std::vector<Word>& q) {
+        // det(zE-F) modulo p as det(E) det(zI-E^-1 F), in descending powers, as plain residues
+        // below p. False when p divides det(E).
+        bool reference_characteristic(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,Word p,std::vector<Word>& q) {
             const Montgomery m(p);
             std::vector<Word> a;
             Word det_e=0;
-            if(!reduce_pencil(e,f,diagonal_e,m,a,det_e))return false;
-            const auto chi=hessenberg_charpoly(a,e.n,m);
+            if(!reference_reduce(e,f,diagonal_e,m,a,det_e))return false;
+            const auto chi=reference_hessenberg(a,e.n,m);
             q.resize(chi.size());
             for(std::size_t k=0;k<chi.size();++k)q[k]=m.from(m.mul(det_e,chi[k]));
+            return true;
+        }
+        // Scratch space of one worker's residue kernel, reused from modulus to modulus. Every entry
+        // the kernel reads it writes first for the current modulus. Three n x n arrays: B; the factor
+        // L of E in l and U in hc, both dead once B is formed; then H in hc and its L in l, which the
+        // determinant recurrence reuses for the polynomials.
+        struct ResidueWorkspace {
+            std::vector<Word> b,hc,l,factor,inverse,y,v,w,g,values,u;
+            std::vector<std::size_t> row,first,column_first,last;
+            std::vector<std::uint32_t> index,rows,columns;
+            std::vector<Montgomery::Multiplier> multipliers;
+        };
+        // s|z| R^-1 mod p, negated for negative z: the Montgomery form of z times s R^-2, so s = R^2
+        // gives the Montgomery form of z. A one-limb |z| needs no division, as any word times s < p is
+        // below p 2^64.
+        Word scaled_residue(const Z& z,Word s,const Montgomery& m) {
+            const auto size=mpz_size(z.get_mpz_t());
+            if(size==0)return 0;
+            const mp_limb_t* limbs=mpz_limbs_read(z.get_mpz_t());
+            const Word r=m.mul(size==1?limbs[0]:mpn_mod_1(limbs,static_cast<mp_size_t>(size),m.p),s);
+            return mpz_sgn(z.get_mpz_t())<0&&r?m.p-r:r;
+        }
+        // B = (E^-1 F)^T over F_p in Montgomery form, row-major: row j is E^-1 times column j of F.
+        // B and E^-1 F have the same characteristic polynomial. Also det(E) mod p; false when p divides
+        // det(E). A diagonal E costs one product per nonzero of F and one inversion (Montgomery's
+        // batch trick). A general E is factored PE = LU (Crout, partial pivoting, U unit upper) and each
+        // column solved by substitution, so apart from the pivot divisions every product is part of a
+        // dot product. L keeps the leading zeros of the rows of PE, U those of the columns of E in
+        // pivot order, and the forward substitution those of Pg; the dot products skip them.
+        bool transposed_quotient(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,const Montgomery& m,
+                                 ResidueWorkspace& ws,Word& det_e) {
+            const auto n=e.n;
+            auto& b=ws.b;
+            b.resize(n*n);
+            det_e=m.to(1);
+            if(diagonal_e) {
+                // prefix[i] = d_0...d_i, then each d_i^-1 from the inverse of the whole product.
+                auto& d=ws.factor;
+                auto& prefix=ws.inverse;
+                d.resize(n);
+                prefix.resize(n);
+                for(std::size_t i=0;i<n;++i) {
+                    d[i]=scaled_residue(e(i,i),m.r2,m);
+                    if(d[i]==0)return false;
+                    det_e=m.mul(det_e,d[i]);
+                    prefix[i]=det_e;
+                }
+                Word inverse=m.inverse(det_e);
+                for(std::size_t i=n;i-->1;) {
+                    const Word di=d[i];
+                    // (d_i^-1 R) R^2 R^-1 = d_i^-1 R^2 scales a residue to the Montgomery form of z/d_i.
+                    d[i]=m.mul(m.mul(inverse,prefix[i-1]),m.r2);
+                    inverse=m.mul(inverse,di);
+                }
+                d[0]=m.mul(inverse,m.r2);
+                for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j)b[j*n+i]=scaled_residue(f(i,j),d[i],m);
+                return true;
+            }
+            for(std::size_t i=0;i<n;++i)for(std::size_t j=0;j<n;++j)b[j*n+i]=scaled_residue(f(i,j),m.r2,m);
+            // w holds PE, then L in and below the diagonal; u[c*n+k] = U_kc, column c of U contiguous.
+            auto& w=ws.l;
+            auto& u=ws.hc;
+            auto& inverse=ws.inverse;
+            auto& row=ws.row;
+            auto& first=ws.first;
+            auto& column_first=ws.column_first;
+            w.resize(n*n);
+            u.resize(n*n);
+            inverse.resize(n);
+            row.resize(n);
+            first.assign(n,n);
+            column_first.assign(n,n);
+            for(std::size_t i=0;i<n;++i) {
+                row[i]=i;
+                for(std::size_t j=0;j<n;++j) {
+                    w[i*n+j]=scaled_residue(e(i,j),m.r2,m);
+                    if(w[i*n+j]&&first[i]==n)first[i]=j;
+                }
+            }
+            for(std::size_t k=0;k<n;++k) {
+                // L_ik = (PE)_ik - sum_(t<k) L_it U_tk for i >= k; L_it = 0 for t < first[i] and
+                // U_tk = 0 for t < column_first[k], the first pivot row with a nonzero in column k.
+                for(std::size_t i=k;i<n;++i) {
+                    const auto s=std::max(first[i],column_first[k]);
+                    if(s<k)w[i*n+k]=m.sub(w[i*n+k],m.dot(&w[i*n+s],&u[k*n+s],k-s));
+                }
+                std::size_t pivot=k;
+                while(pivot<n&&w[pivot*n+k]==0)++pivot;
+                if(pivot==n)return false;
+                if(pivot!=k) {
+                    std::swap_ranges(w.begin()+static_cast<std::ptrdiff_t>(k*n),w.begin()+static_cast<std::ptrdiff_t>((k+1)*n),
+                                     w.begin()+static_cast<std::ptrdiff_t>(pivot*n));
+                    std::swap(row[k],row[pivot]);
+                    std::swap(first[k],first[pivot]);
+                    det_e=m.sub(0,det_e);
+                }
+                det_e=m.mul(det_e,w[k*n+k]);
+                inverse[k]=m.inverse(w[k*n+k]);
+                // Row k of PE past the diagonal is still E's: U_kc = ((PE)_kc - sum_(t<k) L_kt U_tc)/L_kk.
+                for(std::size_t c=k+1;c<n;++c) {
+                    if(w[k*n+c]&&column_first[c]==n)column_first[c]=k;
+                    if(column_first[c]>k) {
+                        u[c*n+k]=0;
+                        continue;
+                    }
+                    const auto s=std::max(first[k],column_first[c]);
+                    const Word t=s<k?m.sub(w[k*n+c],m.dot(&w[k*n+s],&u[c*n+s],k-s)):w[k*n+c];
+                    u[c*n+k]=m.mul(t,inverse[k]);
+                }
+            }
+            // U row-major for the back substitution; last[k] is the last nonzero column of row k.
+            for(std::size_t i=0;i<n;++i)for(std::size_t j=i+1;j<n;++j)std::swap(u[i*n+j],u[j*n+i]);
+            auto& last=ws.last;
+            last.resize(n);
+            for(std::size_t k=0;k<n;++k) {
+                last[k]=k;
+                for(std::size_t c=n;c-->k+1;)if(u[k*n+c]) {
+                    last[k]=c;
+                    break;
+                }
+            }
+            auto& y=ws.y;
+            y.resize(n);
+            for(std::size_t j=0;j<n;++j) {
+                // E x = g with g column j of F: L y = Pg, then U x = y, in place of g. y_k = 0 below the
+                // first nonzero of Pg.
+                Word* x=&b[j*n];
+                std::size_t zero=0;
+                while(zero<n&&x[row[zero]]==0)y[zero++]=0;
+                if(zero==n)continue;
+                for(std::size_t k=zero;k<n;++k) {
+                    const auto s=std::max(first[k],zero);
+                    const Word t=s<k?m.sub(x[row[k]],m.dot(&w[k*n+s],&y[s],k-s)):x[row[k]];
+                    y[k]=m.mul(t,inverse[k]);
+                }
+                for(std::size_t k=n;k-->0;)x[k]=last[k]>k?m.sub(y[k],m.dot(&u[k*n+k+1],&x[k+1],last[k]-k)):y[k];
+            }
+            return true;
+        }
+        // Gaussian similarity of h (row-major) towards upper Hessenberg form while the columns stay
+        // sparse: at column j, with pivot h_(j+1,j) and u_r = h_rj/h_(j+1,j) for the nonzero h_rj
+        // below it, row r -= u_r row j+1 and then column j+1 += sum_r u_r column r. Zero rows and
+        // columns cost nothing. Stops at the first column with more than a quarter of the entries
+        // below its subdiagonal nonzero and returns its index, n when every column is done.
+        std::size_t sparse_hessenberg(std::vector<Word>& h,std::size_t n,const Montgomery& m,ResidueWorkspace& ws) {
+            auto& rows=ws.rows;
+            auto& columns=ws.columns;
+            auto& u=ws.u;
+            auto& multipliers=ws.multipliers;
+            for(std::size_t j=0;j+2<n;++j) {
+                std::size_t pivot=j+1;
+                while(pivot<n&&h[pivot*n+j]==0)++pivot;
+                if(pivot==n)continue;
+                // Rows between j+1 and the pivot have zeros in column j, so after the swap the nonzero
+                // entries below the subdiagonal are those below the pivot.
+                rows.clear();
+                for(std::size_t r=pivot+1;r<n;++r)if(h[r*n+j])rows.push_back(static_cast<std::uint32_t>(r));
+                if(4*rows.size()>n-j-2)return j;
+                if(pivot!=j+1) {
+                    std::swap_ranges(h.begin()+static_cast<std::ptrdiff_t>(pivot*n),h.begin()+static_cast<std::ptrdiff_t>((pivot+1)*n),
+                                     h.begin()+static_cast<std::ptrdiff_t>((j+1)*n));
+                    for(std::size_t q=0;q<n;++q)std::swap(h[q*n+pivot],h[q*n+j+1]);
+                }
+                if(rows.empty())continue;
+                const Word inverse=m.inverse(h[(j+1)*n+j]);
+                u.clear();
+                multipliers.clear();
+                for(const auto r:rows) {
+                    u.push_back(m.mul(h[r*n+j],inverse));
+                    multipliers.push_back(m.multiplier(u.back()));
+                }
+                const Word* pivot_row=&h[(j+1)*n];
+                columns.clear();
+                for(std::size_t c=j+1;c<n;++c)if(pivot_row[c])columns.push_back(static_cast<std::uint32_t>(c));
+                for(std::size_t t=0;t<rows.size();++t) {
+                    Word* target=&h[rows[t]*n];
+                    target[j]=0;
+                    for(const auto c:columns)target[c]=m.sub(target[c],m.times(multipliers[t],pivot_row[c]));
+                }
+                if(rows.size()<=4) {
+                    for(std::size_t t=0;t<rows.size();++t)for(std::size_t q=0;q<n;++q) {
+                        const Word x=h[q*n+rows[t]];
+                        if(x)h[q*n+j+1]=m.add(h[q*n+j+1],m.times(multipliers[t],x));
+                    }
+                }
+                else for(std::size_t q=0;q<n;++q)
+                    h[q*n+j+1]=m.add(h[q*n+j+1],m.dot(&h[q*n],rows.data(),u.data(),rows.size()));
+            }
+            return n;
+        }
+        // Completes the Hessenberg form of b (row-major; columns below `start` already Hessenberg) into
+        // ws.hc, column-major: hc[k*n+i] = h_ik for i <= k+1. Column by column, B L = L H with L unit
+        // lower triangular and l_i = e_i for i <= start: column j of H solves L h = B l_j on rows 0..j,
+        // the remaining rows r = B l_j - L h give h_(j+1,j) = r_(j+1) after a symmetric pivoting swap and
+        // l_(j+1) = r/r_(j+1); a zero r gives h_(j+1,j) = 0 and l_(j+1) = e_(j+1). Every product but those
+        // forming l_(j+1) is part of a dot product, and b changes only by the swaps.
+        void dense_hessenberg(std::vector<Word>& b,std::size_t n,const Montgomery& m,std::size_t start,ResidueWorkspace& ws) {
+            auto& hc=ws.hc;
+            hc.resize(n*n);
+            for(std::size_t k=0;k<std::min(start,n);++k)for(std::size_t i=0;i<=std::min(k+1,n-1);++i)hc[k*n+i]=b[i*n+k];
+            if(start>=n)return;
+            // l[k*n+t] = (l_t)_k for start <= t < k; v = l_j.
+            auto& l=ws.l;
+            auto& v=ws.v;
+            auto& w=ws.w;
+            l.resize(n*n);
+            v.resize(n);
+            w.resize(n);
+            const Word one=m.to(1);
+            v[start]=one;
+            for(std::size_t k=start+1;k<n;++k)v[k]=l[k*n+start]=0;
+            for(std::size_t j=start;j<n;++j) {
+                for(std::size_t q=0;q<n;++q)w[q]=m.dot(&b[q*n+j],&v[j],n-j);
+                Word* h=&hc[j*n];
+                for(std::size_t i=0;i<=j;++i)h[i]=i>start?m.sub(w[i],m.dot(&l[i*n+start],&h[start],i-start)):w[i];
+                if(j+1==n)break;
+                // w becomes r on rows j+1..n-1.
+                for(std::size_t k=j+1;k<n;++k)w[k]=m.sub(w[k],m.dot(&l[k*n+start],&h[start],j+1-start));
+                std::size_t pivot=j+1;
+                while(pivot<n&&w[pivot]==0)++pivot;
+                v[j+1]=one;
+                if(pivot==n) {
+                    h[j+1]=0;
+                    for(std::size_t k=j+2;k<n;++k)v[k]=l[k*n+j+1]=0;
+                    continue;
+                }
+                if(pivot!=j+1) {
+                    std::swap_ranges(b.begin()+static_cast<std::ptrdiff_t>(pivot*n),b.begin()+static_cast<std::ptrdiff_t>((pivot+1)*n),
+                                     b.begin()+static_cast<std::ptrdiff_t>((j+1)*n));
+                    for(std::size_t q=0;q<n;++q)std::swap(b[q*n+pivot],b[q*n+j+1]);
+                    std::swap_ranges(l.begin()+static_cast<std::ptrdiff_t>(pivot*n+start),l.begin()+static_cast<std::ptrdiff_t>(pivot*n+j+1),
+                                     l.begin()+static_cast<std::ptrdiff_t>((j+1)*n+start));
+                    std::swap(w[pivot],w[j+1]);
+                }
+                h[j+1]=w[j+1];
+                const auto inverse=m.multiplier(m.inverse(w[j+1]));
+                for(std::size_t k=j+2;k<n;++k)v[k]=l[k*n+j+1]=m.times(inverse,w[k]);
+            }
+        }
+        // det(zI-H) for H upper Hessenberg (column-major in ws.hc), in descending powers. With p_k =
+        // det(zI-H_k) for the leading k x k block, p_k = z p_(k-1) - sum_(s<k) g_s p_s, where g_(k-1) =
+        // h_(k-1,k-1) and g_s = h_(s,k-1) h_(s+1,s) h_(s+2,s+1)...h_(k-1,k-2) (0-based). So p_k[d] =
+        // p_(k-1)[d-1] - sum_(s>=d) g_s p_s[d]: one dot product per degree, over the nonzero g_s alone
+        // when they are few. g_s = 0 above the first nonzero of column k-1 and below a zero subdiagonal.
+        void hessenberg_determinant(std::size_t n,const Montgomery& m,ResidueWorkspace& ws,std::vector<Word>& chi) {
+            const auto& hc=ws.hc;
+            // poly[d*(n+1)+s] = p_s[d] for d <= s.
+            const auto stride=n+1;
+            auto& poly=ws.l;
+            auto& g=ws.g;
+            auto& index=ws.index;
+            auto& values=ws.values;
+            poly.resize(stride*stride);
+            g.resize(n);
+            const Word one=m.to(1);
+            poly[0]=one;
+            for(std::size_t k=1;k<=n;++k) {
+                const Word* column=&hc[(k-1)*n];
+                std::size_t top=0;
+                while(top<k&&column[top]==0)++top;
+                std::size_t low=k-1,nonzero=0;
+                g[k-1]=column[k-1];
+                if(top<k) {
+                    nonzero=g[k-1]!=0;
+                    Word product=one;
+                    for(std::size_t s=k-1;s-->top;) {
+                        product=m.mul(product,hc[s*n+s+1]);
+                        if(product==0)break;
+                        low=s;
+                        g[s]=column[s]?m.mul(column[s],product):0;
+                        nonzero+=g[s]!=0;
+                    }
+                }
+                const bool sparse=2*nonzero<k-low;
+                if(sparse) {
+                    index.clear();
+                    values.clear();
+                    for(std::size_t s=low;s<k;++s)if(g[s]) {
+                        index.push_back(static_cast<std::uint32_t>(s));
+                        values.push_back(g[s]);
+                    }
+                }
+                std::size_t first=0;
+                for(std::size_t d=0;d<k;++d) {
+                    Word t=d?poly[(d-1)*stride+k-1]:0;
+                    const Word* p=&poly[d*stride];
+                    if(sparse) {
+                        while(first<index.size()&&index[first]<d)++first;
+                        if(first<index.size())t=m.sub(t,m.dot(p,&index[first],&values[first],index.size()-first));
+                    }
+                    else {
+                        const auto s=std::max(d,low);
+                        if(s<k)t=m.sub(t,m.dot(&g[s],p+s,k-s));
+                    }
+                    poly[d*stride+k]=t;
+                }
+                poly[k*stride+k]=one;
+            }
+            chi.resize(n+1);
+            for(std::size_t t=0;t<=n;++t)chi[t]=poly[(n-t)*stride+n];
+        }
+        // The work of one modulus, shared by the oracle and Chinese remaindering: the same residues
+        // as reference_characteristic, from B = (E^-1 F)^T, its Hessenberg form and the determinant
+        // recurrence.
+        bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,Word p,std::vector<Word>& q,
+                                    ResidueWorkspace& ws) {
+            const Montgomery m(p);
+            const auto n=e.n;
+            Word det_e=0;
+            if(!transposed_quotient(e,f,diagonal_e,m,ws,det_e))return false;
+            dense_hessenberg(ws.b,n,m,sparse_hessenberg(ws.b,n,m,ws),ws);
+            hessenberg_determinant(n,m,ws,q);
+            for(auto& c:q)c=m.from(m.mul(det_e,c));
             return true;
         }
         // The batch that would bring `proven_bits` to `need_bits` if every modulus in it is usable.
@@ -680,16 +1064,18 @@ namespace secular {
             constexpr unsigned char unusable=0,match=1,mismatch=2;
             std::size_t proven_bits=0,next_prime=0,unusable_count=0;
             std::optional<Team> team;
+            std::vector<ResidueWorkspace> workspaces;
             for(;;) {
                 const auto batch=prime_batch(proven_bits,need_bits,next_prime);
                 if(!team) {
                     out.workers=oracle_worker_count(requested,batch.size());
                     team.emplace(out.workers);
+                    workspaces.resize(team->size());
                 }
                 std::vector<unsigned char> outcome(batch.size(),unusable);
-                team->run(batch.size(),[&](std::size_t index,unsigned) {
+                team->run(batch.size(),[&](std::size_t index,unsigned slot) {
                     std::vector<Word> q;
-                    if(!modular_characteristic(e,f,diagonal_e,batch[index],q))return;
+                    if(!modular_characteristic(e,f,diagonal_e,batch[index],q,workspaces[slot]))return;
                     for(std::size_t k=0;k<=n;++k)if(residue(c[k],batch[index])!=q[k]) {
                         outcome[index]=mismatch;
                         return;
@@ -1444,16 +1830,18 @@ namespace secular {
         std::vector<Word> primes,residues;
         std::size_t proven_bits=0,next_prime=0;
         std::optional<Team> team;
+        std::vector<ResidueWorkspace> workspaces;
         while(proven_bits<need_bits) {
             const auto batch=prime_batch(proven_bits,need_bits,next_prime);
             if(!team) {
                 r.workers=oracle_worker_count(requested,batch.size());
                 team.emplace(r.workers);
+                workspaces.resize(team->size());
             }
             std::vector<std::vector<Word>> found(batch.size());
             std::vector<unsigned char> usable(batch.size(),0);
-            team->run(batch.size(),[&](std::size_t index,unsigned) {
-                usable[index]=modular_characteristic(re,rf,diagonal_e,batch[index],found[index]);
+            team->run(batch.size(),[&](std::size_t index,unsigned slot) {
+                usable[index]=modular_characteristic(re,rf,diagonal_e,batch[index],found[index],workspaces[slot]);
             });
             for(std::size_t index=0;index<batch.size();++index) {
                 if(!usable[index]) {
@@ -1665,6 +2053,31 @@ namespace secular {
         return prime_at(index);
 #else
         (void)index;
+        throw std::logic_error("modular oracle requires 64-bit GMP limbs and 128-bit integers");
+#endif
+    }
+    std::vector<std::optional<std::vector<std::uint64_t>>> pencil_residues(const ZMatrix& e,const ZMatrix& f,
+                                                                           const std::vector<std::uint64_t>& primes,
+                                                                           ResidueKernel kernel) {
+        if(e.n==0||e.n>max_dimension||e.n!=f.n||e.data.size()!=e.n*e.n||f.data.size()!=e.n*e.n)
+            throw std::invalid_argument("invalid pencil storage");
+#ifdef SECULAR_MODULAR_ORACLE
+        for(const auto p:primes)
+            if(p<3||p%2==0||p>=(Word(1)<<62)||!proven_prime(p))throw std::invalid_argument("modulus must be an odd prime below 2^62");
+        const bool diagonal_e=diagonal(e);
+        std::vector<std::optional<std::vector<std::uint64_t>>> out;
+        out.reserve(primes.size());
+        ResidueWorkspace workspace;
+        for(const auto p:primes) {
+            std::vector<Word> q;
+            const bool usable=kernel==ResidueKernel::reference?reference_characteristic(e,f,diagonal_e,p,q):
+                              modular_characteristic(e,f,diagonal_e,p,q,workspace);
+            out.push_back(usable?std::optional(std::move(q)):std::nullopt);
+        }
+        return out;
+#else
+        (void)primes;
+        (void)kernel;
         throw std::logic_error("modular oracle requires 64-bit GMP limbs and 128-bit integers");
 #endif
     }

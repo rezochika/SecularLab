@@ -233,5 +233,17 @@ namespace secular {
     // The index-th prime of the fixed descending sequence of proven primes below 2^62
     // used by the modular oracle (index 0 is the largest).
     std::uint64_t oracle_prime(std::size_t index);
+    // Implementations of the residue kernel behind the modular oracle and crt_characteristic.
+    // Every residue is a field computation modulo p, so both give the same residues; `reference`
+    // is the plain Gauss-Jordan and Hessenberg reduction kept to test `fast` against.
+    enum class ResidueKernel {
+        fast,reference
+    };
+    // det(zE-F) modulo each odd prime p < 2^62 in descending powers, as residues below p, or nullopt
+    // when p divides det(E). One workspace serves every prime, as in the oracle. Exposed for tests and
+    // benchmarks. Requires the modular oracle.
+    std::vector<std::optional<std::vector<std::uint64_t>>> pencil_residues(const ZMatrix& e,const ZMatrix& f,
+                                                                           const std::vector<std::uint64_t>& primes,
+                                                                           ResidueKernel kernel=ResidueKernel::fast);
     bool has_repeated_roots(const std::vector<Z>& coefficients);
 }
