@@ -67,6 +67,40 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         checks+=4
     run(['coefficients','--matrix',matrix/'spd3.mtx','--oracle','bareiss','--out',d/'coeff_bareiss'])
     assert (d/'coeff_bareiss/coefficients.tsv').read_bytes()==(d/'coeff1/coefficients.tsv').read_bytes(); checks+=1
+    # Chinese remaindering of the oracle's residues replaces the recurrence, alone or beside it
+    # (N-version), for diagonal and dense mass, with or without content removal: identical artifacts.
+    for name,pencil in (('spd3',['--matrix',matrix/'spd3.mtx']),
+                        ('dense',['--matrix',matrix/'dense_stiffness3.mtx','--mass',matrix/'dense_mass3.mtx'])):
+        reference=None
+        for method in ('recurrence','crt','both'):
+            for content in ([],['--remove-content']):
+                out=d/('method_'+name+'_'+method+('_content' if content else ''))
+                run(['solve',*pencil,'--digits','30','--workers','2','--coefficients',method,*content,'--out',out])
+                result=json.loads((out/'result.json').read_text())
+                assert result['coefficient_method']==method and result['content_removed']==bool(content)
+                assert result['certification_method']=='polynomial' and result['coefficient_identity_verified']
+                assert result['coefficient_oracle']==('modular' if method=='recurrence' else 'crt')
+                assert (result['coefficient_moduli']>=1)==(method!='recurrence')==(result['crt_workers']>=1)
+                assert 1<=result['primitive_coefficient_bits_max']<=result['coefficient_bits_max']
+                assert result['times_seconds']['crt']>=0 and (method=='crt')==(result['recurrence_workers']==0)
+                artifacts=[(out/artifact).read_bytes() for artifact in ('coefficients.tsv','eigenvalues.tsv')]
+                reference=reference or artifacts
+                assert artifacts==reference; checks+=7
+                replay=run(['verify',*pencil,'--cert',out/'eigenvalues.tsv','--coefficients',method,*content])
+                assert replay.stdout.split()[0]=='VERIFIED' and 'certification_method=polynomial' in replay.stdout
+        if name=='spd3':
+            assert reference==[(d/'workers1'/artifact).read_bytes() for artifact in ('coefficients.tsv','eigenvalues.tsv')]; checks+=1
+    for method,oracle,expected in (('crt',[],'crt'),('both',[],'crt'),('crt',['--oracle','bareiss'],'bareiss')):
+        out=d/('coeff_'+method+'_'+expected)
+        line=run(['coefficients','--matrix',matrix/'spd3.mtx','--coefficients',method,*oracle,'--out',out]).stdout
+        assert 'determinant_identity_verified=yes' in line and 'coefficient_oracle='+expected in line
+        assert 'coefficient_method='+method in line
+        assert (out/'coefficients.tsv').read_bytes()==(d/'coeff1/coefficients.tsv').read_bytes(); checks+=3
+    # det(E)=0 is proven from the skipped moduli; the request fails as the recurrence does.
+    for method in ('recurrence','crt'):
+        failed=run(['coefficients','--matrix',matrix/'spd2.mtx','--mass',matrix/'singular_mass2.mtx',
+                    '--coefficients',method,'--out',d/('singular_coefficients_'+method)],2)
+        assert 'singular mass/leading matrix' in failed.stderr; checks+=1
     for workers in (1, 4):
         run(['coefficients','--matrix',matrix/'galerkin2_K0.mtx','--mass',matrix/'galerkin2_M.mtx','--affine',matrix/'galerkin2_K1.mtx','--workers',workers,'--out',d/('affine'+str(workers))])
     assert (d/'affine1/coefficients_affine.tsv').read_bytes()==(d/'affine4/coefficients_affine.tsv').read_bytes(); checks+=1
@@ -115,11 +149,26 @@ with tempfile.TemporaryDirectory(prefix='secular-tests-') as td:
         out=d/(mode+'_invalid_oracle')
         run([*base,'--oracle','approximate','--out',out],2)
         assert not out.exists(); checks+=1
+        out=d/(mode+'_invalid_coefficients')
+        run([*base,'--coefficients','approximate','--out',out],2)
+        assert not out.exists(); checks+=1
     # An oracle choice without a coefficient identity check is contradictory.
     for args in (['solve','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--oracle','bareiss'],
                  ['coefficients','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--oracle','auto'],
                  ['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--certification','inertia','--oracle','bareiss']):
         out=d/('oracle_without_check_'+args[0])
+        run([*args,'--out',out],2)
+        assert not out.exists(); checks+=1
+    # Chinese remaindering is itself the identity proof, content removal acts on polynomial
+    # stages only, and formal affine coefficients have no Chinese-remainder route.
+    for index,args in enumerate((['solve','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--coefficients','crt'],
+                 ['coefficients','--matrix',matrix/'spd3.mtx','--no-coefficient-check','--coefficients','both'],
+                 ['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--certification','inertia','--coefficients','crt'],
+                 ['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--certification','inertia','--remove-content'],
+                 ['coefficients','--matrix',matrix/'spd3.mtx','--remove-content'],
+                 ['coefficients','--matrix',matrix/'galerkin2_K0.mtx','--mass',matrix/'galerkin2_M.mtx',
+                  '--affine',matrix/'galerkin2_K1.mtx','--coefficients','crt'])):
+        out=d/('contradictory_'+str(index))
         run([*args,'--out',out],2)
         assert not out.exists(); checks+=1
     run(['verify','--matrix',matrix/'spd3.mtx','--cert',cert,'--no-coefficient-check','--out',d/'weaken_verify'],2)

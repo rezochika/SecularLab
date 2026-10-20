@@ -19,11 +19,14 @@ namespace {
                 [--affine K1.mtx --parameter 1/3]
                 [--affine K1.mtx --legendre-degree 128 --argument 1/3]
                 [--workers 0..64] [--certification auto|inertia]
+                [--coefficients recurrence|crt|both] [--remove-content]
                 [--oracle auto|bareiss] [--no-coefficient-check] [--out results/new-run]
   secular coefficients --matrix K.mtx [--mass M.mtx] [--affine K1.mtx]
-                       [--workers 0..64] [--oracle auto|bareiss] [--out results/new-coefficients]
+                       [--workers 0..64] [--coefficients recurrence|crt|both]
+                       [--oracle auto|bareiss] [--out results/new-coefficients]
   secular verify --matrix K.mtx [--mass M.mtx] --cert eigenvalues.tsv
                  [--workers 0..64] [--certification auto|inertia] [--oracle auto|bareiss]
+                 [--coefficients recurrence|crt|both] [--remove-content]
                  [--out results/replay]
 
 Matrix Market real/integer coordinate or array files; exact decimal/scientific
@@ -44,6 +47,12 @@ proof: 0 means every hardware thread (at most 64); explicit 1..64 is clamped to
 the jobs of each phase and also bounds peak memory; under CPU quotas or job limits,
 pass the quota. Results never depend on it.
 --no-coefficient-check forces solve to use inertia and is forbidden for verify.
+Coefficients come from the adjugate recurrence by default. crt instead Chinese-
+remainders the oracle's residues modulo proven primes whose product exceeds twice
+every coefficient bound, which proves them by itself (--oracle bareiss adds the
+Bareiss check); both runs the two and requires identical integers. Neither
+allows --no-coefficient-check or formal affine input. --remove-content runs the
+Graeffe, squarefree and sign stages on q/content(q); coefficients.tsv keeps q.
 
 Exit 0: successful computation/verification; exit 1: unresolved/repeated spectrum
 or invalid certificate; exit 2: invalid input, resource or I/O error.
@@ -80,10 +89,10 @@ int main(int argc,char** argv) {
         std::string mode=argv[1];
         if(mode!="solve"&&mode!="coefficients"&&mode!="verify")throw std::invalid_argument("unknown command: "+mode);
         const std::set<std::string> valued= {
-            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert","--workers","--certification","--oracle"
+            "--matrix","--mass","--affine","--parameter","--legendre-degree","--argument","--digits","--precision","--max-precision","--max-squarings","--out","--cert","--workers","--certification","--oracle","--coefficients"
         };
         std::map<std::string,std::string> args;
-        bool check=true;
+        bool check=true,remove_content=false;
         for(int i=2;i<argc;++i) {
             std::string a=argv[i];
             if(a=="--help") {
@@ -92,6 +101,10 @@ int main(int argc,char** argv) {
             }
             if(a=="--no-coefficient-check") {
                 check=false;
+                continue;
+            }
+            if(a=="--remove-content") {
+                remove_content=true;
                 continue;
             }
             if(!valued.count(a)||i+1>=argc)throw std::invalid_argument("unknown option or missing value: "+a);
@@ -115,6 +128,18 @@ int main(int argc,char** argv) {
                 throw std::invalid_argument("--oracle requires a coefficient identity check");
             o.coefficient_oracle=oracle=="auto"?CoefficientOracle::automatic:CoefficientOracle::bareiss;
         }
+        if(args.count("--coefficients")) {
+            const auto& method=args.at("--coefficients");
+            if(method!="recurrence"&&method!="crt"&&method!="both")throw std::invalid_argument("--coefficients must be recurrence, crt or both");
+            if(mode=="verify"&&!o.polynomial_certification)throw std::invalid_argument("--coefficients requires polynomial certification");
+            if(method!="recurrence"&&!check)throw std::invalid_argument("--coefficients crt or both proves the coefficients; it contradicts --no-coefficient-check");
+            o.coefficient_method=method=="recurrence"?CoefficientMethod::recurrence:method=="crt"?CoefficientMethod::crt:CoefficientMethod::both;
+        }
+        if(remove_content) {
+            if(mode=="coefficients")throw std::invalid_argument("--remove-content requires solve or verify");
+            if(mode=="verify"&&!o.polynomial_certification)throw std::invalid_argument("--remove-content requires polynomial certification");
+            o.remove_content=true;
+        }
         if(mode=="verify"&&!check)throw std::invalid_argument("--no-coefficient-check is not allowed for verify");
         if(args.count("--digits"))o.digits=number(args.at("--digits"),1000);
         if(args.count("--precision"))o.precision=number(args.at("--precision"),20000);
@@ -136,6 +161,8 @@ int main(int argc,char** argv) {
         if(args.count("--argument")&&!args.count("--legendre-degree"))throw std::invalid_argument("--argument requires --legendre-degree");
         if(parameter&&!k1)throw std::invalid_argument("parameter requires --affine");
         if(k1&&mode!="coefficients"&&!parameter)throw std::invalid_argument("solve/verify affine input requires parameter");
+        if(k1&&!parameter&&o.coefficient_method!=CoefficientMethod::recurrence)
+            throw std::invalid_argument("--coefficients crt or both requires a fixed pencil, not formal affine input");
         if(parameter)for(std::size_t i=0;i<k.data.size();++i)k.data[i]+=*parameter*k1->data[i];
         if(mode=="verify") {
             if(!args.count("--cert"))throw std::invalid_argument("verify requires --cert");
@@ -209,15 +236,11 @@ int main(int argc,char** argv) {
                 std::cout<<"EXACT_AFFINE_COEFFICIENTS order="<<k.n<<" determinant_grid_verified="<<(verified?"yes":"no")<<'\n';
                 return 0;
             }
-            auto p=integer_pencil(k,m);
             // The recurrence runs on the reduced pencil; the oracle checks the original one.
-            auto co=reduced_characteristic(p.E,p.F,o.oracle_workers);
-            OracleReport oracle;
-            if(check)oracle=check_coefficients(p.E,p.F,co.coefficients,o.oracle_workers,o.coefficient_oracle);
-            if(check&&!oracle.verified)throw std::logic_error("coefficient identity failed");
-            coefficients_file(dir/"coefficients.tsv",co.coefficients,p.scale);
-            std::cout<<"EXACT_COEFFICIENTS order="<<k.n<<" determinant_identity_verified="<<(oracle.verified?"yes":"no")
-                     <<" coefficient_oracle="<<oracle.method<<'\n';
+            const auto co=exact_coefficients(integer_pencil(k,m),o,check);
+            coefficients_file(dir/"coefficients.tsv",co.coefficients,co.determinant_scale);
+            std::cout<<"EXACT_COEFFICIENTS order="<<k.n<<" determinant_identity_verified="<<(co.coefficient_identity_verified?"yes":"no")
+                     <<" coefficient_oracle="<<co.coefficient_oracle<<" coefficient_method="<<co.coefficient_method<<'\n';
             return 0;
         }
         o.progress=[](const std::string& s) {

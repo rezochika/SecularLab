@@ -535,6 +535,97 @@ namespace secular {
             }
             return {p[n].rbegin(),p[n].rend()};
         }
+        // The work of one modulus, shared by the oracle and Chinese remaindering: det(zE-F) modulo
+        // p as det(E) det(zI-E^-1 F), in descending powers, as plain residues below p. False when
+        // p divides det(E).
+        bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,Word p,std::vector<Word>& q) {
+            const Montgomery m(p);
+            std::vector<Word> a;
+            Word det_e=0;
+            if(!reduce_pencil(e,f,diagonal_e,m,a,det_e))return false;
+            const auto chi=hessenberg_charpoly(a,e.n,m);
+            q.resize(chi.size());
+            for(std::size_t k=0;k<chi.size();++k)q[k]=m.from(m.mul(det_e,chi[k]));
+            return true;
+        }
+        // The batch that would bring `proven_bits` to `need_bits` if every modulus in it is usable.
+        std::vector<Word> prime_batch(std::size_t proven_bits,std::size_t need_bits,std::size_t& next_prime) {
+            std::vector<Word> batch;
+            for(std::size_t planned=proven_bits;planned<need_bits;planned+=61)batch.push_back(prime_at(next_prime++));
+            return batch;
+        }
+        Z word(Word w) {
+            Z z;
+            mpz_import(z.get_mpz_t(),1,-1,sizeof w,0,0,&w);
+            return z;
+        }
+        // Chinese remaindering for fixed distinct odd primes p_i with product M. A residue vector
+        // r_i gives x = sum_i ((r_i w_i) mod p_i) M/p_i, with w_i = (M/p_i)^-1 mod p_i, so x = r_i
+        // modulo every p_i and 0 <= x < count*M. The sum is formed up a product tree, where a node
+        // with children (x_L,M_L) and (x_R,M_R) holds x_L M_R + x_R M_L, and then reduced to the
+        // symmetric range |x| <= (M-1)/2.
+        class Remainderer {
+        public:
+            Remainderer(const std::vector<Word>& moduli,Team& team):primes(moduli),weights(moduli.size()) {
+                arithmetic.reserve(primes.size());
+                tree.emplace_back();
+                for(const auto p:primes) {
+                    arithmetic.emplace_back(p);
+                    tree.back().push_back(word(p));
+                }
+                while(tree.back().size()>1) {
+                    const auto& below=tree.back();
+                    std::vector<Z> level((below.size()+1)/2);
+                    for(std::size_t j=0;j<level.size();++j)
+                        level[j]=2*j+1<below.size()?Z(below[2*j]*below[2*j+1]):below[2*j];
+                    tree.push_back(std::move(level));
+                }
+                half=tree.back().front()/2;
+                team.run(primes.size(),[&](std::size_t i,unsigned) {
+                    // Every prime is below 2^62 < 2*p_i, so p_j mod p_i is one conditional subtraction.
+                    const Montgomery& m=arithmetic[i];
+                    Word others=m.to(1);
+                    for(std::size_t j=0;j<primes.size();++j)if(j!=i)
+                        others=m.mul(others,m.to(primes[j]>=primes[i]?primes[j]-primes[i]:primes[j]));
+                    weights[i]=m.inverse(others);
+                });
+            }
+            // residues[i*stride] is the residue modulo p_i.
+            Z combine(const Word* residues,std::size_t stride)const {
+                std::vector<Z> x(primes.size());
+                for(std::size_t i=0;i<primes.size();++i) {
+                    // A plain residue times a Montgomery-form weight gives their plain product.
+                    x[i]=word(arithmetic[i].mul(residues[i*stride],weights[i]));
+                }
+                Z sum;
+                for(std::size_t h=0;h+1<tree.size();++h) {
+                    const auto& moduli=tree[h];
+                    const auto size=x.size();
+                    // Node j reads only children 2j and 2j+1 >= j, so the level is formed in place.
+                    for(std::size_t j=0;2*j+1<size;++j) {
+                        mpz_mul(sum.get_mpz_t(),x[2*j].get_mpz_t(),moduli[2*j+1].get_mpz_t());
+                        mpz_addmul(sum.get_mpz_t(),x[2*j+1].get_mpz_t(),moduli[2*j].get_mpz_t());
+                        mpz_swap(x[j].get_mpz_t(),sum.get_mpz_t());
+                    }
+                    if(size%2)mpz_swap(x[size/2].get_mpz_t(),x[size-1].get_mpz_t());
+                    x.resize((size+1)/2);
+                }
+                Z& value=x.front();
+                mpz_mod(value.get_mpz_t(),value.get_mpz_t(),tree.back().front().get_mpz_t());
+                // M is odd, so half=(M-1)/2 and the representatives are -(M-1)/2..(M-1)/2.
+                if(value>half)value-=tree.back().front();
+                return std::move(value);
+            }
+        private:
+            std::vector<Word> primes;
+            std::vector<Montgomery> arithmetic;
+            // w_i in Montgomery form modulo p_i.
+            std::vector<Word> weights;
+            // tree[0] holds the primes, tree[h+1][j] the product of tree[h][2j] and tree[h][2j+1]
+            // (a lone last node is carried up); the root is M.
+            std::vector<std::vector<Z>> tree;
+            Z half;
+        };
         enum class ModularStatus {
             verified,refuted,inconclusive
         };
@@ -590,20 +681,16 @@ namespace secular {
             std::size_t proven_bits=0,next_prime=0,unusable_count=0;
             std::optional<Team> team;
             for(;;) {
-                std::vector<Word> batch;
-                for(std::size_t planned=proven_bits;planned<need_bits;planned+=61)batch.push_back(prime_at(next_prime++));
+                const auto batch=prime_batch(proven_bits,need_bits,next_prime);
                 if(!team) {
                     out.workers=oracle_worker_count(requested,batch.size());
                     team.emplace(out.workers);
                 }
                 std::vector<unsigned char> outcome(batch.size(),unusable);
                 team->run(batch.size(),[&](std::size_t index,unsigned) {
-                    const Montgomery m(batch[index]);
-                    std::vector<Word> a;
-                    Word det_e=0;
-                    if(!reduce_pencil(e,f,diagonal_e,m,a,det_e))return;
-                    const auto chi=hessenberg_charpoly(a,n,m);
-                    for(std::size_t k=0;k<=n;++k)if(residue(c[k],m.p)!=m.from(m.mul(det_e,chi[k]))) {
+                    std::vector<Word> q;
+                    if(!modular_characteristic(e,f,diagonal_e,batch[index],q))return;
+                    for(std::size_t k=0;k<=n;++k)if(residue(c[k],batch[index])!=q[k]) {
                         outcome[index]=mismatch;
                         return;
                     }
@@ -1276,6 +1363,63 @@ namespace secular {
             r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(r.coefficients[k]));
         }
         return r;
+    }
+    CoefficientResult crt_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned requested) {
+        if(e.n!=f.n)throw std::invalid_argument("pencil dimensions differ");
+        const auto n=e.n;
+        if(n==0||e.data.size()!=n*n||f.data.size()!=n*n)throw std::invalid_argument("invalid pencil storage");
+        oracle_worker_count(requested,1);
+#ifdef SECULAR_MODULAR_ORACLE
+        // |q_m| <= B_m < M/2 once M > 2*max_m B_m; 61k >= bits(max B)+1 ensures it for k moduli.
+        const auto bound=identity_bound(e,f);
+        const std::size_t need_bits=bits(*std::max_element(bound.begin(),bound.end()))+1;
+        const bool diagonal_e=diagonal(e);
+        CoefficientResult r;
+        std::vector<Word> primes,residues;
+        std::size_t proven_bits=0,next_prime=0;
+        std::optional<Team> team;
+        while(proven_bits<need_bits) {
+            const auto batch=prime_batch(proven_bits,need_bits,next_prime);
+            if(!team) {
+                r.workers=oracle_worker_count(requested,batch.size());
+                team.emplace(r.workers);
+            }
+            std::vector<std::vector<Word>> found(batch.size());
+            std::vector<unsigned char> usable(batch.size(),0);
+            team->run(batch.size(),[&](std::size_t index,unsigned) {
+                usable[index]=modular_characteristic(e,f,diagonal_e,batch[index],found[index]);
+            });
+            for(std::size_t index=0;index<batch.size();++index) {
+                if(!usable[index]) {
+                    ++r.skipped_moduli;
+                    continue;
+                }
+                primes.push_back(batch[index]);
+                residues.insert(residues.end(),found[index].begin(),found[index].end());
+                proven_bits+=61;
+            }
+            // As in the oracle: that many skipped moduli above 2^61 prove det(E)=0.
+            if(proven_bits<need_bits&&r.skipped_moduli*61>=bits(bound[0]))
+                throw std::invalid_argument("singular mass/leading matrix");
+        }
+        r.moduli=primes.size();
+        const Remainderer crt(primes,*team);
+        r.coefficients.resize(n+1);
+        team->run(n+1,[&](std::size_t k,unsigned) {
+            r.coefficients[k]=crt.combine(residues.data()+k,n+1);
+        });
+        // q_0=det(E) is nonzero modulo every usable prime, so it cannot be zero; checked anyway.
+        if(r.coefficients.front()==0)throw std::logic_error("Chinese remaindering gave det(E)=0");
+        for(const auto& c:r.coefficients)r.max_coefficient_bits=std::max(r.max_coefficient_bits,bits(c));
+        return r;
+#else
+        throw std::logic_error("Chinese remaindering requires the modular oracle: 64-bit GMP limbs and 128-bit integers");
+#endif
+    }
+    Z polynomial_content(const std::vector<Z>& coefficients) {
+        Z g=0;
+        for(const auto& c:coefficients)mpz_gcd(g.get_mpz_t(),g.get_mpz_t(),c.get_mpz_t());
+        return g==0?Z(1):g;
     }
     std::vector<std::vector<Z>> affine_characteristic(const ZMatrix& e,const ZMatrix& f0,const ZMatrix& f1) {
         if(e.n!=f0.n||e.n!=f1.n)throw std::invalid_argument("affine dimensions differ");

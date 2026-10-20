@@ -124,12 +124,27 @@ namespace secular {
         // descending powers, actual signs: det(zE-F)
         std::size_t exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
         bool terminal_zero {};
-        // Threads that computed the rows of each recurrence stage.
+        // Threads that computed the rows of each recurrence stage, or the residues of crt_characteristic.
         unsigned workers {};
+        // crt_characteristic only: primes whose residues were combined, and primes skipped
+        // because they divide det(E).
+        std::size_t moduli {},skipped_moduli {};
     };
     // Workers as for oracle_worker_count, clamped to the n rows of a stage.
     // Every worker count gives identical results.
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
+    // det(zE-F) by Chinese remaindering the residues that the modular oracle computes: det(E)
+    // det(zI-E^-1 F) modulo oracle primes not dividing det(E), until their product M exceeds twice
+    // every coefficient bound B_m. The symmetric residue modulo M is then the coefficient itself,
+    // so the result is proven as the oracle proves a given vector. The same integers as
+    // characteristic(); no recurrence statistic is filled. Throws std::invalid_argument for a
+    // singular E, as characteristic() does, once the skipped primes prove det(E)=0. Workers as for
+    // oracle_worker_count, clamped to the first batch of primes. Requires the modular oracle
+    // (64-bit GMP limbs and 128-bit integers); otherwise throws std::logic_error.
+    CoefficientResult crt_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
+    // The positive gcd of the coefficients, 1 for a zero vector. q/content has the same roots,
+    // and the same signs everywhere.
+    Z polynomial_content(const std::vector<Z>& coefficients);
     // An exact diagonal congruence and content reduction: E = alpha*P*E'*P and F = beta*P*F'*P,
     // with P = diag(scale) and every scale entry a product of powers of 2 and 5. Then
     // det(zE-F) = prod(scale)^2 * sum_k c'_k alpha^(n-k) beta^k z^(n-k), where c' are the

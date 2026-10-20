@@ -120,6 +120,48 @@ recurrence, not independent authorship or formal verification of the implementat
 `--no-coefficient-check` skips the oracle; it never disables the recurrence's exact division and
 terminal-zero checks.
 
+### Coefficients by Chinese remaindering
+
+The oracle's work for one prime p already yields every coefficient of det(zE-F) modulo p, as
+det(E) chi with chi the Hessenberg characteristic polynomial of E^-1 F. `--coefficients crt` keeps
+these residues and combines them instead of running the recurrence. Primes are taken from the same
+fixed sequence, those dividing det E are skipped, until k usable primes satisfy
+61k >= bits(max_m B_m)+1. Their product M then exceeds 2 max_m B_m. For each m, Chinese
+remaindering gives the unique c_m with |c_m| <= (M-1)/2 that agrees with P_m modulo every prime.
+Since |P_m| <= B_m < M/2, c_m = P_m. In the oracle's terms, the primes' product M exceeds
+|c_m|+B_m <= M/2+B_m, and c agrees with det(E) chi modulo each of them, so the construction is
+itself the multimodular proof. Running the modular oracle afterwards would recompute the same
+residues, so `coefficient_oracle` reports `crt` and `oracle_moduli` the primes combined;
+`--oracle bareiss` still adds the n+1 Bareiss determinants. Skipped primes are counted as in the
+oracle; once they prove det E = 0, the request fails with the recurrence's error for a singular
+leading matrix. Like the modular oracle, this route needs 64-bit GMP limbs and 128-bit integers.
+
+The combination uses the weights w_i = (M/p_i)^-1 mod p_i, formed once with O(k^2) word
+operations. Each coefficient is then x = sum_i ((r_i w_i) mod p_i) M/p_i, summed up a product
+tree whose node with children (x_L,M_L), (x_R,M_R) holds x_L M_R + x_R M_L, and reduced modulo M
+into the symmetric range. Residues are computed one prime per worker, coefficients one per
+worker. No recurrence runs, so `exact_divisions`, `recurrence_workspace_bits_max` and
+`recurrence_workers` are zero; `coefficient_moduli` and `crt_workers` describe the combination.
+The integers are those of the recurrence, so `coefficients.tsv` and the certificates are
+byte-identical.
+
+`--coefficients both` runs the recurrence and Chinese remaindering and requires identical
+integers: an N-version check of the two constructions, which share only the input pencil and GMP.
+The identity proof is the Chinese-remainder one. Both routes are themselves proofs, so they
+reject `--no-coefficient-check`; neither applies to formal affine coefficients.
+
+### Content removal
+
+With decimal input, q = det(zE-F) usually carries a large content g = gcd(q_0,...,q_n): on
+BCSSTK05 g has 4387 bits, and q/g has 8778-bit coefficients against 13165 for q. Every
+`result.json` reports `coefficient_bits_max` (q), `primitive_coefficient_bits_max` (q/g) and
+`coefficient_content_bits`. `--remove-content` runs the squarefree test, the Graeffe stage and
+every polynomial sign on q/g. With g > 0, (q/g)(x) has the sign of q(x) at every rational x, so
+both have the same roots, brackets and singletons, and every acceptance test is unchanged.
+`coefficients.tsv` still holds q. The Graeffe mantissas of q/g round differently, so candidates
+may differ in their last working bits; proposal widths see them only through powers of ten and
+centers rounded at width+8 places, so certificates normally do not change.
+
 Before recovery, squarefreeness is tested modulo the fixed primes 2, 3, 5, 7, 11, 65537, 2^31-1,
 2^32-5 and 2^32-17, in that order. A prime that keeps the degree and gives gcd(f, f') = 1 modulo p
 proves f squarefree. Otherwise a primitive integer pseudo-remainder gcd of f and f' decides
@@ -420,7 +462,9 @@ bounds. Integer coefficient length, input denominators and elimination growth ca
 Symmetric pencils need about half of those operations, and the n rows of each stage are spread
 over the workers. The modular oracle needs O(n^3) word operations per prime, plus one pass over
 every entry and coefficient to form residues. The number of primes is about the bound's bit
-length divided by 61. The n+1 Bareiss determinants instead cost
+length divided by 61. Chinese remaindering needs the same residues for about as many primes,
+plus O(k^2) word operations for its weights and one product tree per coefficient, so it replaces
+the O(n^4) recurrence and the oracle by roughly the oracle's cost. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
@@ -452,3 +496,6 @@ otherwise. It excludes those inside Bareiss elimination, the reduction, the orac
 inertia routine.
 `coefficient_oracle` names the oracle that decided the identity, `oracle_moduli` the primes of a
 modular decision, and `oracle_workers` and `recurrence_workers` the threads actually used.
+`coefficient_method` is `recurrence`, `crt` or `both`; `coefficient_moduli` and `crt_workers`
+describe Chinese remaindering, and `times_seconds.crt` is its share of `times_seconds.coefficients`.
+`content_removed` tells whether the root stages used q/content(q).
