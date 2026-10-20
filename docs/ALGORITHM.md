@@ -95,6 +95,24 @@ det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced to upper 
 similarity, its characteristic polynomial follows from the Hessenberg recurrence, and all n+1
 coefficients of q, including q_0=det E, must match det(E) chi modulo p.
 
+Every residue is a field computation modulo p, so any correct algorithm gives the same residues;
+the kernel is chosen for speed. It forms B = (E^-1 F)^T, which has the characteristic polynomial
+of E^-1 F. A diagonal E scales the nonzero entries of F after one batch inversion of its diagonal.
+A general E is factored PE = LU with partial pivoting in Crout order, and each column of F is
+solved by substitution, skipping the leading zeros of L, U and the right-hand side. B is reduced to
+upper Hessenberg form H by Gaussian similarity with pivoting, column by column through B L = L H
+with L unit lower triangular: column j of H solves a triangular system against B l_j, and the rest
+of that product gives l_(j+1). While the columns below the subdiagonal stay sparse, the classical
+elimination row r -= u_r row j+1, column j+1 += u_r column r runs instead and skips zero rows and
+columns; it hands over at the first column with more than a quarter of those entries nonzero.
+det(zI-H) then follows from the recurrence p_k = z p_(k-1) - sum_(s<k) g_s p_s, one dot product per
+coefficient. The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
+time in 128 bits, then into 192 bits, and reduced once per dot product, and fixed multipliers use
+Shoup's precomputed quotient. So nearly every product is one 64x64-bit multiplication and an
+addition. The tests check this kernel against the plain Gauss-Jordan and Hessenberg reduction it
+replaced, on random and structured pencils and on small primes, where zero pivots and det E = 0
+modulo p are common.
+
 Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
 determinant bounds every true coefficient by the corresponding coefficient B_m of
 prod_i(ceil||E_i|| z + ceil||F_i||), indexed in descending powers like q. Primes are taken from a
@@ -524,7 +542,15 @@ the one-thread coefficient stage fell from 0.145 to 0.021 s on the A-mid4 pencil
 0.038 s on the lumped Laplacian of order 256 (73 to 8) and from 1.2 to 0.85 s on BCSSTK05 (220 to
 153). Pencils without that structure kept their primes and times within noise; the reduction
 then costs a few milliseconds of serial work. Total solve time changed less, because Graeffe and
-certification dominate there. The n+1 Bareiss determinants instead cost
+certification dominate there. The residue kernel of section 2 then cut the work per prime without
+changing a residue or the number of primes. On one thread, a prime took 7.9 ms instead of 48 ms on
+the order-256 pencil with a diagonal mass and a dense stiffness, and 0.41 ms instead of 2.2 ms on
+the dense order-64 pencil with a spread spectrum. In 192 further runs, again with byte-identical
+artifacts, the one-thread coefficient stage fell from 10.9 to 1.6 s and from 0.50 to 0.098 s on
+those two pencils, where FLINT's exact solve and characteristic polynomial take 4.25 s and 0.30 s;
+on 32 threads it fell from 0.55 to 0.13 s and from 0.032 to 0.013 s. The dense mass of order 256
+went from 15.6 to 1.9 s on one thread. Sparse pencils, whose reduction already skipped zeros,
+changed least: the band-3 rotation of order 256 from 0.14 to 0.10 s. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
