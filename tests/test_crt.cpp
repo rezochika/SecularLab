@@ -123,35 +123,47 @@ namespace {
     // The residue kernels against the reference kernel (Gauss-Jordan on [E | F], then the right-looking
     // Hessenberg reduction) and against the exact coefficients modulo p. Small primes make zero pivots,
     // pivoting swaps, zero subdiagonals, Lanczos breakdowns and det(E) = 0 modulo p common; nullopt must
-    // mean p | det(E). The symmetric kernel takes the symmetric routes on every symmetric pencil, so each
-    // modulus ends in one of them or in one of their fallbacks.
+    // mean p | det(E). The symmetric and factored kernels take the symmetric routes on every symmetric
+    // pencil (the congruence and the factored route for E not diagonal), so each modulus ends in one of
+    // them or in one of their fallbacks.
     unsigned singular_moduli=0;
-    ResidueRoutes fast_routes,symmetric_routes;
+    ResidueRoutes fast_routes,symmetric_routes,factored_routes;
     void add(ResidueRoutes& total,const ResidueRoutes& r) {
         total.lanczos+=r.lanczos;
         total.congruence+=r.congruence;
+        total.factored+=r.factored;
         total.pivot_fallbacks+=r.pivot_fallbacks;
         total.breakdown_fallbacks+=r.breakdown_fallbacks;
     }
     std::size_t routed(const ResidueRoutes& r) {
-        return r.lanczos+r.congruence+r.pivot_fallbacks+r.breakdown_fallbacks;
+        return r.lanczos+r.congruence+r.factored+r.pivot_fallbacks+r.breakdown_fallbacks;
     }
     ResidueRoutes kernels_agree(const ZMatrix& e,const ZMatrix& f,const std::vector<std::uint64_t>& primes) {
-        ResidueRoutes fast_route,symmetric_route;
+        ResidueRoutes fast_route,symmetric_route,factored_route;
         const auto fast=pencil_residues(e,f,primes,ResidueKernel::fast,&fast_route);
         const auto reference=pencil_residues(e,f,primes,ResidueKernel::reference);
         check(fast==reference,"residue kernel differs from the reference kernel");
         check(pencil_residues(e,f,primes,ResidueKernel::general)==reference,"general kernel differs from the reference kernel");
         check(pencil_residues(e,f,primes,ResidueKernel::symmetric,&symmetric_route)==reference,
               "symmetric kernel differs from the reference kernel");
+        check(pencil_residues(e,f,primes,ResidueKernel::factored,&factored_route)==reference,
+              "factored kernel differs from the reference kernel");
         std::size_t usable=0;
         for(const auto& r:reference)usable+=r.has_value();
-        if(!symmetric(e)||!symmetric(f))check(routed(fast_route)==0&&routed(symmetric_route)==0,"symmetric route on an unsymmetric pencil");
+        if(!symmetric(e)||!symmetric(f))check(routed(fast_route)==0&&routed(symmetric_route)==0&&routed(factored_route)==0,
+                                               "symmetric route on an unsymmetric pencil");
         else if(diagonal(e))check(symmetric_route.lanczos+symmetric_route.breakdown_fallbacks==usable&&
-                                  symmetric_route.congruence==0&&symmetric_route.pivot_fallbacks==0,"Lanczos routes");
-        else check(routed(symmetric_route)==primes.size()&&symmetric_route.lanczos==0,"congruence routes");
+                                  symmetric_route.congruence==0&&symmetric_route.factored==0&&symmetric_route.pivot_fallbacks==0&&
+                                  factored_route.lanczos==symmetric_route.lanczos&&routed(factored_route)==routed(symmetric_route),
+                                  "Lanczos routes");
+        else {
+            check(routed(symmetric_route)==primes.size()&&symmetric_route.lanczos==0&&symmetric_route.factored==0,"congruence routes");
+            check(routed(factored_route)==primes.size()&&factored_route.lanczos==0&&factored_route.congruence==0,"factored routes");
+            check(routed(fast_route)==primes.size()&&(fast_route.congruence==0||fast_route.factored==0),"one route per pencil");
+        }
         add(fast_routes,fast_route);
         add(symmetric_routes,symmetric_route);
+        add(factored_routes,factored_route);
         const Z det=determinant(e);
         const auto exact=det!=0?characteristic(e,f).coefficients:std::vector<Z>{};
         for(std::size_t i=0;i<primes.size();++i) {
@@ -371,6 +383,9 @@ int main() {
                 check(determinant(pivot.e)%word(p0)!=0,"constructed pivot-free failure");
                 const auto routes=kernels_agree(pivot.e,pivot.f,{p0,p1});
                 check(routes.pivot_fallbacks==1&&routes.congruence==1,"zero LDL^T pivot did not fall back");
+                ResidueRoutes factored;
+                pencil_residues(pivot.e,pivot.f,{p0,p1},ResidueKernel::factored,&factored);
+                check(factored.pivot_fallbacks==1&&factored.factored==1,"zero LDL^T pivot: factored route");
             }
             // Every eigenvalue twice: the Krylov space of any vector is a proper invariant subspace, so
             // Lanczos breaks down at every modulus, after E diagonal and after the congruence alike.
@@ -392,6 +407,18 @@ int main() {
                 kernels_agree(dense_e,dense_f,large);
                 pencil_residues(dense_e,dense_f,large,ResidueKernel::symmetric,&routes);
                 check(routes.breakdown_fallbacks==3&&routes.congruence==0,"repeated eigenvalues: dense E");
+                pencil_residues(dense_e,dense_f,large,ResidueKernel::factored,&routes);
+                check(routes.breakdown_fallbacks==3&&routes.factored==0,"repeated eigenvalues: dense E, factored route");
+                // Two copies of an 8 x 8 pencil with tridiagonal E and F: E banded, every eigenvalue twice.
+                ZMatrix band_e(16),band_f(16);
+                const auto g8e=structured_matrix(8,1,8,20,100),g8f=structured_matrix(8,1,8,20,100);
+                for(std::size_t i=0;i<16;++i)for(std::size_t j=0;j<16;++j)if(i/8==j/8) {
+                    band_e(i,j)=g8e(i%8,j%8);
+                    band_f(i,j)=g8f(i%8,j%8);
+                }
+                kernels_agree(band_e,band_f,large);
+                pencil_residues(band_e,band_f,large,ResidueKernel::factored,&routes);
+                check(routes.breakdown_fallbacks==3&&routes.factored==0,"repeated eigenvalues: banded E, factored route");
             }
             // The fast kernel decides the diagonal-E route once per pencil: dense rows take Lanczos, a
             // tridiagonal F (already Hessenberg) and 3 x 3 blocks (zero subdiagonals) the general route,
@@ -408,12 +435,44 @@ int main() {
                 const auto blocks=structured_matrix(64,64,4,20,100);
                 kernels_agree(multiply(blocks,blocks),structured_matrix(64,6,64,20,100),large);
             }
-            // Mostly small primes: 1226 Lanczos, 512 congruence, 109 pivot and 446 breakdown fallbacks for
-            // the symmetric kernel when written. The fast kernel keeps tridiagonal F (all of n <= 2) and
-            // some banded F on the general route: 329 Lanczos and 196 breakdowns.
+            // For E not diagonal the fast kernel forms C at one modulus when the bounds leave the choice
+            // open. A generic band fills C, so Lanczos through the factor of E is cheaper: pentadiagonal E
+            // and F, E with a sparse F on wide ranges (products on F's nonzeros), and an E whose profile
+            // has gaps (L^T rows with zeros in their range). F = L Lambda L^T with E = L D L^T keeps C
+            // diagonal, and a dense E and F never try the factored route.
+            {
+                const std::vector<std::uint64_t> large {p0,p1};
+                const std::size_t n=32;
+                const auto band_e=structured_matrix(n,2,n,12,100);
+                check(kernels_agree(band_e,structured_matrix(n,2,n,12,100),large).factored==2,"banded E and F: factored route");
+                ZMatrix wide=identity<Z>(n);
+                for(std::size_t i=0;i<n;++i)wide(i,i)=random_integer(12);
+                for(std::size_t i=8;i<n;i+=8)wide(i,0)=wide(0,i)=wide(i,i-8)=wide(i-8,i)=random_integer(12);
+                check(kernels_agree(band_e,wide,large).factored==2,"banded E, sparse F: factored route");
+                auto gaps=structured_matrix(n,1,n,12,100);
+                for(std::size_t i=12;i<n;i+=9)gaps(i,i-9)=gaps(i-9,i)=random_integer(12);
+                check(kernels_agree(gaps,structured_matrix(n,3,n,12,100),large).factored==2,"E with profile gaps: factored route");
+                ZMatrix l=identity<Z>(n),d(n),lambda(n);
+                for(std::size_t i=0;i<n;++i) {
+                    d(i,i)=abs(random_integer(12))+1;
+                    lambda(i,i)=random_integer(12);
+                    for(std::size_t j=i>2?i-2:0;j<i;++j)l(i,j)=random_integer(6);
+                }
+                const auto congruent=kernels_agree(multiply(l,multiply(d,transpose(l))),multiply(l,multiply(lambda,transpose(l))),large);
+                check(congruent.congruence==2&&congruent.factored==0,"diagonal C: congruence");
+                const auto dense=random_pencil(n,false,true,true,12,100);
+                check(kernels_agree(dense.e,dense.f,large).congruence==2,"dense E and F: congruence");
+            }
+            // Mostly small primes: 1226 Lanczos, 522 congruence, 109 pivot and 449 breakdown fallbacks for
+            // the symmetric kernel when written, 518 factored, 109 pivot and 453 breakdown fallbacks for the
+            // factored kernel. The fast kernel keeps tridiagonal F (all of n <= 2) and some banded F on the
+            // general route and takes the factored route where C fills (dense E behind a sparse F): 329
+            // Lanczos, 305 congruence, 220 factored and 196 breakdowns.
             check(symmetric_routes.lanczos>1000&&symmetric_routes.congruence>400&&symmetric_routes.pivot_fallbacks>80&&
                   symmetric_routes.breakdown_fallbacks>300,"symmetric routes or fallbacks rarely taken");
-            check(fast_routes.lanczos>250&&fast_routes.congruence>400&&fast_routes.pivot_fallbacks>80&&
+            check(factored_routes.factored>400&&factored_routes.congruence==0&&factored_routes.pivot_fallbacks>80&&
+                  factored_routes.breakdown_fallbacks>300,"factored route or its fallbacks rarely taken");
+            check(fast_routes.lanczos>250&&fast_routes.congruence>250&&fast_routes.factored>150&&fast_routes.pivot_fallbacks>80&&
                   fast_routes.breakdown_fallbacks>150,"fast kernel rarely took the symmetric routes");
             invalid([] {
                 pencil_residues(identity<Z>(2),identity<Z>(2),{9});

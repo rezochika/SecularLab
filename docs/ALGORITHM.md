@@ -131,12 +131,32 @@ exact cancellation can keep it sparse, as for the band-3 rotation pencil. So unl
 mostly full, the sparse reduction runs once, for one prime, counting its products, and the pencil
 keeps the cheaper route.
 
+A banded E has a banded L but in general a dense L^-1, and so a dense C: forming C is cheap, but
+Lanczos on it takes n^3 products. A third route keeps C implicit and runs Lanczos on (E, F) in
+the inner product x^T E y. Each q = E^-1 u solves L y = u row by row as u is formed and then
+L^T q = D^-1 y from the last row up, on the rows of L and of L^T (the columns of L, stored as rows
+with their last nonzero), so a step is one product with F and one with each of L and L^T, about
+n(4b+1) products for E and F of half-bandwidth b, and O(b n^2) for all n steps. The substitutions
+are chains of dependent rows, so these products cost about 1.1 times the congruence's per product,
+and the congruence's C need not be dense: F = L Lambda L^T, as in pencils built from a common factor
+(cluster32 and the A-mid4 pencils, not cluster32lu), keeps it diagonal, and then forming it,
+(n+1) sum_i (i-first_i) products, and Lanczos on it cost less. Only C shows which case holds. So unless even a dense C
+would favour the congruence, as for a dense E behind a dense F, one prime forms C once per pencil,
+and the pencil keeps the route with fewer products, the factored route's counted 1.1 times; the
+overheads per row of a Lanczos step and per entry of C came to about the same and cancel. The
+factored route falls back as the congruence does, a zero pivot to the LU route and a breakdown to
+the general route.
+
 The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
 time in 128 bits, then into 192 bits, and reduced once per dot product, and fixed multipliers use
 Shoup's precomputed quotient. So nearly every product is one 64x64-bit multiplication and an
-addition. The tests check every route against the plain Gauss-Jordan and Hessenberg reduction the
-kernel replaced, on random and structured pencils and on small primes, where zero pivots, Lanczos
-breakdowns and det E = 0 modulo p are common, and force each fallback at the large primes.
+addition. Subtraction modulo p is a conditional move rather than a branch, which would mispredict
+half the time on residues: it adds p under the borrow's mask, except where a row of a substitution
+ends on its dot product with the rows before, which arrives last; there it picks between a-b and
+(a+p)-b, one cycle sooner. The tests check every route against the plain Gauss-Jordan and
+Hessenberg reduction the kernel replaced, on random and structured pencils and on small primes,
+where zero pivots, Lanczos breakdowns and det E = 0 modulo p are common, and force each fallback
+at the large primes.
 
 Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
 determinant bounds every true coefficient by the corresponding coefficient B_m of
@@ -587,7 +607,14 @@ with a dense F are as many as the Hessenberg form and its recurrence take, only 
 order-64 pencil and from 1.70 to 1.49 s on the diagonal-mass pencil; on 32 threads from 0.029 to
 0.017, 0.146 to 0.107, 0.014 to 0.013 and 0.140 to 0.119 s. The Laplacian and the rotation pencil
 keep the general route; deciding that costs the rotation pencil about 0.6 ms once, 1-3% of its
-one-thread stage. The n+1 Bareiss determinants instead cost
+one-thread stage. The factored route then took a prime of the band-1 consistent-mass pencil of
+order 256 in 1.04 ms instead of 6.6 ms, of order 64 in 0.069 ms instead of 0.147 ms, and of random
+bands of order 256 in 1.0-2.0 ms instead of 6.6-6.8 ms for half-bandwidths 1-8 and of 2D grids of
+order 72-240 1.8-4.0 times faster, again with identical residues. Of the X5 pencils only cluster32lu
+takes it: 0.023 ms instead of 0.029 ms a prime, and its one-thread coefficient stage 0.74 ms instead
+of 1.06 ms, with byte-identical artifacts in 96 runs on the eight pencils with E not diagonal.
+cluster32 and the A-mid4 pencils, whose C is diagonal, keep the congruence, and pay up to 2% a prime
+for the decision and code placement. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r

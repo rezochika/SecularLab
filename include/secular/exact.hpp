@@ -237,9 +237,10 @@ namespace secular {
     // Every residue is a field computation modulo p, so all give the same residues; `reference`
     // is the plain Gauss-Jordan and Hessenberg reduction kept to test the others against. `fast`
     // is what the oracle and crt_characteristic run; `general` never takes the symmetric routes,
-    // and `symmetric` takes them for every pencil with E and F symmetric, however sparse.
+    // and `symmetric` takes them for every pencil with E and F symmetric, however sparse, with the
+    // congruence for E not diagonal; `factored` is `symmetric` with the factored route in its place.
     enum class ResidueKernel {
-        fast,reference,general,symmetric
+        fast,reference,general,symmetric,factored
     };
     // How the residues of pencil_residues were formed, one count per modulus.
     struct ResidueRoutes {
@@ -247,6 +248,8 @@ namespace secular {
         std::size_t lanczos=0;
         // Lanczos residues after E = LDL^T and C = L^-1 F L^-T.
         std::size_t congruence=0;
+        // Lanczos residues of (E, F) after E = LDL^T, with E^-1 applied by solves with L, D and L^T.
+        std::size_t factored=0;
         // LDL^T met a zero pivot; the general route followed.
         std::size_t pivot_fallbacks=0;
         // Lanczos broke down; the Hessenberg form of D^-1 S followed.
