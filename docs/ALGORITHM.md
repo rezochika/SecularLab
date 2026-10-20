@@ -160,7 +160,8 @@ every polynomial sign on q/g. With g > 0, (q/g)(x) has the sign of q(x) at every
 both have the same roots, brackets and singletons, and every acceptance test is unchanged.
 `coefficients.tsv` still holds q. The Graeffe mantissas of q/g round differently, so candidates
 may differ in their last working bits; proposal widths see them only through powers of ten and
-centers rounded at width+8 places, so certificates normally do not change.
+centers rounded at width+8 places, so certificates normally do not change. On the 16 pencils of
+the FLINT/Arb comparison they were byte-identical with and without `--remove-content`.
 
 Before recovery, squarefreeness is tested modulo the fixed primes 2, 3, 5, 7, 11, 65537, 2^31-1,
 2^32-5 and 2^32-17, in that order. A prime that keeps the degree and gives gcd(f, f') = 1 modulo p
@@ -464,7 +465,15 @@ over the workers. The modular oracle needs O(n^3) word operations per prime, plu
 every entry and coefficient to form residues. The number of primes is about the bound's bit
 length divided by 61. Chinese remaindering needs the same residues for about as many primes,
 plus O(k^2) word operations for its weights and one product tree per coefficient, so it replaces
-the O(n^4) recurrence and the oracle by roughly the oracle's cost. The n+1 Bareiss determinants instead cost
+the O(n^4) recurrence and the oracle by roughly the oracle's cost. On the 16 pencils of the
+FLINT/Arb comparison (Ryzen 9 7950X, Windows, CLion MinGW Release; medians), `--coefficients crt`
+cut total solve time by 1.2-364x on 32 threads and 1.2-141x on one thread, with byte-identical
+artifacts in all 277 runs. BCSSTK05 took 0.17 s instead of 0.52 s on 32 threads (1.25 s instead of
+4.8 s on one), the n=100 LU-mass pencil 0.08 s instead of 12.4 s (0.57 s instead of 70 s), and the
+dense mass of order 256 1.7 s instead of 602 s (16 s on one thread). The primes needed follow
+the Hadamard bound, which tracks q including its content: where q/content(q) is far shorter, as
+for the clustered A-mid4 pencils (22145 against 1384 bits), the number of primes is set by the
+longer q. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
