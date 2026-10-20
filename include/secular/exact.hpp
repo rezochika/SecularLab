@@ -234,16 +234,30 @@ namespace secular {
     // used by the modular oracle (index 0 is the largest).
     std::uint64_t oracle_prime(std::size_t index);
     // Implementations of the residue kernel behind the modular oracle and crt_characteristic.
-    // Every residue is a field computation modulo p, so both give the same residues; `reference`
-    // is the plain Gauss-Jordan and Hessenberg reduction kept to test `fast` against.
+    // Every residue is a field computation modulo p, so all give the same residues; `reference`
+    // is the plain Gauss-Jordan and Hessenberg reduction kept to test the others against. `fast`
+    // is what the oracle and crt_characteristic run; `general` never takes the symmetric routes,
+    // and `symmetric` takes them for every pencil with E and F symmetric, however sparse.
     enum class ResidueKernel {
-        fast,reference
+        fast,reference,general,symmetric
+    };
+    // How the residues of pencil_residues were formed, one count per modulus.
+    struct ResidueRoutes {
+        // Lanczos residues of E diagonal and F symmetric.
+        std::size_t lanczos=0;
+        // Lanczos residues after E = LDL^T and C = L^-1 F L^-T.
+        std::size_t congruence=0;
+        // LDL^T met a zero pivot; the general route followed.
+        std::size_t pivot_fallbacks=0;
+        // Lanczos broke down; the Hessenberg form of D^-1 S followed.
+        std::size_t breakdown_fallbacks=0;
     };
     // det(zE-F) modulo each odd prime p < 2^62 in descending powers, as residues below p, or nullopt
     // when p divides det(E). One workspace serves every prime, as in the oracle. Exposed for tests and
     // benchmarks. Requires the modular oracle.
     std::vector<std::optional<std::vector<std::uint64_t>>> pencil_residues(const ZMatrix& e,const ZMatrix& f,
                                                                            const std::vector<std::uint64_t>& primes,
-                                                                           ResidueKernel kernel=ResidueKernel::fast);
+                                                                           ResidueKernel kernel=ResidueKernel::fast,
+                                                                           ResidueRoutes* routes=nullptr);
     bool has_repeated_roots(const std::vector<Z>& coefficients);
 }

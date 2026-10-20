@@ -622,12 +622,30 @@ namespace secular {
         // Scratch space of one worker's residue kernel, reused from modulus to modulus. Every entry
         // the kernel reads it writes first for the current modulus. Three n x n arrays: B; the factor
         // L of E in l and U in hc, both dead once B is formed; then H in hc and its L in l, which the
-        // determinant recurrence reuses for the polynomials.
+        // determinant recurrence reuses for the polynomials. The symmetric routes keep S (or C) in b,
+        // the congruence its L in l and X in hc; Lanczos needs O(n) more.
         struct ResidueWorkspace {
-            std::vector<Word> b,hc,l,factor,inverse,y,v,w,g,values,u;
+            std::vector<Word> b,hc,l,factor,inverse,y,v,w,g,values,u,lanczos,poly,s;
             std::vector<std::size_t> row,first,column_first,last;
             std::vector<std::uint32_t> index,rows,columns;
             std::vector<Montgomery::Multiplier> multipliers;
+            ResidueRoutes routes;
+        };
+        // How the residues of one pencil are formed, decided once per pencil (residue_plan). general:
+        // B = (E^-1 F)^T, its Hessenberg form and the determinant recurrence. With E and F symmetric,
+        // lanczos (E diagonal) runs Lanczos on (E, F), and congruence (E not diagonal) first reduces
+        // the pencil to (D, L^-1 F L^-T) by E = L D L^T; both fall back to the Hessenberg form.
+        struct ResiduePlan {
+            enum class Route {
+                general,lanczos,congruence
+            } route=Route::general;
+            bool diagonal_e=false;
+            // lanczos: row i of F is zero outside the columns [first[i], last[i]), and when that range
+            // is mostly zeros, its nonzeros are columns column[start[i]..start[i+1]) (sparse). congruence:
+            // row i of E is zero left of column first[i] <= i.
+            std::vector<std::size_t> first,last,start;
+            std::vector<std::uint32_t> column;
+            bool sparse=false;
         };
         // s|z| R^-1 mod p, negated for negative z: the Montgomery form of z times s R^-2, so s = R^2
         // gives the Montgomery form of z. A one-limb |z| needs no division, as any word times s < p is
@@ -760,8 +778,10 @@ namespace secular {
         // sparse: at column j, with pivot h_(j+1,j) and u_r = h_rj/h_(j+1,j) for the nonzero h_rj
         // below it, row r -= u_r row j+1 and then column j+1 += sum_r u_r column r. Zero rows and
         // columns cost nothing. Stops at the first column with more than a quarter of the entries
-        // below its subdiagonal nonzero and returns its index, n when every column is done.
-        std::size_t sparse_hessenberg(std::vector<Word>& h,std::size_t n,const Montgomery& m,ResidueWorkspace& ws) {
+        // below its subdiagonal nonzero and returns its index, n when every column is done. With
+        // `work`, adds the products of each column to it and also stops once it exceeds `budget`.
+        std::size_t sparse_hessenberg(std::vector<Word>& h,std::size_t n,const Montgomery& m,ResidueWorkspace& ws,
+                                      std::size_t* work=nullptr,std::size_t budget=0) {
             auto& rows=ws.rows;
             auto& columns=ws.columns;
             auto& u=ws.u;
@@ -791,6 +811,7 @@ namespace secular {
                 const Word* pivot_row=&h[(j+1)*n];
                 columns.clear();
                 for(std::size_t c=j+1;c<n;++c)if(pivot_row[c])columns.push_back(static_cast<std::uint32_t>(c));
+                if(work&&(*work+=rows.size()*(columns.size()+n))>budget)return j;
                 for(std::size_t t=0;t<rows.size();++t) {
                     Word* target=&h[rows[t]*n];
                     target[j]=0;
@@ -918,19 +939,328 @@ namespace secular {
             chi.resize(n+1);
             for(std::size_t t=0;t<=n;++t)chi[t]=poly[(n-t)*stride+n];
         }
+        // det(zI-D^-1 S) for D = diag(d) and S symmetric, in descending powers, from 1/d (inverse_d) and
+        // w = S q (product): Lanczos in the inner product <x,y> = x^T D y, for which D^-1 S is
+        // self-adjoint. From u_0 and q_0 = D^-1 u_0, q_(k+1) = D^-1 S q_k - alpha_k q_k - beta_k q_(k-1)
+        // with delta_k = <q_k,q_k>, alpha_k = q_k^T S q_k/delta_k and beta_k = delta_k/delta_(k-1), and
+        // u_k = D q_k satisfies the same recurrence with S q_k in place of D^-1 S q_k. Over any field the
+        // q_k are pairwise D-orthogonal while every delta is nonzero, so q_0..q_(n-1) are a basis in which
+        // D^-1 S is tridiagonal with subdiagonal 1, diagonal alpha and superdiagonal beta_1..beta_(n-1):
+        // p_(k+1) = (z-alpha_k) p_k - beta_k p_(k-1). False when a delta_k vanishes, the exact breakdown:
+        // q_k = 0 (the Krylov space of u_0 is a proper invariant subspace) or q_k isotropic. Per step one
+        // product with S, two dot products of length n and 3n products.
+        template<class Product> bool lanczos(std::size_t n,const Montgomery& m,const Word* inverse_d,Product&& product,
+                                             ResidueWorkspace& ws,std::vector<Word>& chi) {
+            auto& t=ws.lanczos;
+            t.resize(7*n);
+            Word* q=t.data();
+            Word* q0=q+n;
+            Word* u=q0+n;
+            Word* u0=u+n;
+            Word* w=u0+n;
+            Word* alpha=w+n;
+            Word* beta=alpha+n;
+            // u_0 is a fixed pseudo-random vector (splitmix64); q_(-1) = u_(-1) = 0.
+            std::uint64_t state=0;
+            for(std::size_t i=0;i<n;++i) {
+                std::uint64_t z=state+=0x9e3779b97f4a7c15;
+                z=(z^(z>>30))*0xbf58476d1ce4e5b9;
+                z=(z^(z>>27))*0x94d049bb133111eb;
+                u[i]=(z^(z>>31))%m.p;
+                q[i]=m.mul(inverse_d[i],u[i]);
+                q0[i]=u0[i]=0;
+            }
+            Word previous=0;
+            for(std::size_t k=0;k<n;++k) {
+                const Word delta=m.dot(q,u,n);
+                if(delta==0)return false;
+                product(q,w);
+                const Word inverse=m.inverse(delta);
+                alpha[k]=m.mul(m.dot(w,q,n),inverse);
+                beta[k]=k?m.mul(delta,previous):0;
+                previous=inverse;
+                if(k+1==n)break;
+                // Both products are below p^2, so their sum is below p 2^64: one reduction.
+                const Word a=alpha[k],b=beta[k];
+                for(std::size_t i=0;i<n;++i) {
+                    const Word next=m.sub(w[i],m.reduce(Wide(a)*u[i]+Wide(b)*u0[i]));
+                    u0[i]=next;
+                    q0[i]=m.mul(inverse_d[i],next);
+                }
+                std::swap(q,q0);
+                std::swap(u,u0);
+            }
+            // p_k in ascending powers; a buffer reused for p_(k+1) held p_(k-2), so it is zero above k-2.
+            auto& poly=ws.poly;
+            poly.assign(3*(n+1),0);
+            Word* p0=poly.data();
+            Word* p1=p0+n+1;
+            Word* p2=p1+n+1;
+            const Word one=m.to(1);
+            p1[0]=one;
+            for(std::size_t k=0;k<n;++k) {
+                const Word a=alpha[k],b=beta[k];
+                p2[0]=m.sub(0,m.reduce(Wide(a)*p1[0]+Wide(b)*p0[0]));
+                for(std::size_t d=1;d<=k;++d)p2[d]=m.sub(p1[d-1],m.reduce(Wide(a)*p1[d]+Wide(b)*p0[d]));
+                p2[k+1]=one;
+                Word* old=p0;
+                p0=p1;
+                p1=p2;
+                p2=old;
+            }
+            chi.resize(n+1);
+            for(std::size_t k=0;k<=n;++k)chi[k]=p1[n-k];
+            return true;
+        }
+        // E = L D L^T without pivoting (L unit lower triangular, row-major in ws.l; d in ws.factor, 1/d in
+        // ws.inverse) and the congruence C = L^-1 F L^-T into ws.b (symmetric, all of it): det(zE-F) =
+        // det(zD-C). L keeps the leading zeros of the rows of E (the plan's first), and every product but
+        // the n^2/2 divisions by pivots is part of a dot product: W = L D row by row (n^3/6), the upper
+        // triangle of X = L^-1 F (n^3/6, column-major in ws.hc), then the lower triangle of C = L^-1 X^T
+        // column by column, its upper part copied from the columns before (n^3/3). False when a pivot
+        // vanishes, whether or not p divides det(E).
+        bool symmetric_congruence(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,const Montgomery& m,
+                                  ResidueWorkspace& ws,Word& det_e) {
+            const auto n=e.n;
+            const auto& first=plan.first;
+            auto& l=ws.l;
+            auto& x=ws.hc;
+            auto& c=ws.b;
+            auto& d=ws.factor;
+            auto& inverse=ws.inverse;
+            auto& w=ws.w;
+            l.resize(n*n);
+            x.resize(n*n);
+            c.resize(n*n);
+            d.resize(n);
+            inverse.resize(n);
+            w.resize(n);
+            det_e=m.to(1);
+            for(std::size_t i=0;i<n;++i) {
+                // W_it = E_it - sum_(s<t) W_is L_ts for t < i, L_it = W_it/d_t, d_i = E_ii - sum_(s<i) W_is L_is.
+                const auto fi=first[i];
+                Word* li=&l[i*n];
+                for(std::size_t t=fi;t<i;++t) {
+                    const auto s=std::max(fi,first[t]);
+                    const Word entry=scaled_residue(e(i,t),m.r2,m);
+                    w[t]=s<t?m.sub(entry,m.dot(&w[s],&l[t*n+s],t-s)):entry;
+                    li[t]=m.mul(w[t],inverse[t]);
+                }
+                const Word entry=scaled_residue(e(i,i),m.r2,m);
+                d[i]=fi<i?m.sub(entry,m.dot(&w[fi],&li[fi],i-fi)):entry;
+                if(d[i]==0)return false;
+                det_e=m.mul(det_e,d[i]);
+                inverse[i]=m.inverse(d[i]);
+            }
+            // X_ji = F_ji - sum_(t<j) L_jt X_ti for i >= j: x[i*n+t] = X_ti.
+            for(std::size_t j=0;j<n;++j) {
+                const auto fj=first[j];
+                const Word* lj=&l[j*n+fj];
+                for(std::size_t i=j;i<n;++i) {
+                    const Word entry=scaled_residue(f(j,i),m.r2,m);
+                    x[i*n+j]=fj<j?m.sub(entry,m.dot(lj,&x[i*n+fj],j-fj)):entry;
+                }
+            }
+            // C_ij = X_ji - sum_(t<i) L_it C_tj for i >= j: c[j*n+i] = C_ij.
+            for(std::size_t j=0;j<n;++j) {
+                Word* cj=&c[j*n];
+                for(std::size_t t=0;t<j;++t)cj[t]=c[t*n+j];
+                for(std::size_t i=j;i<n;++i) {
+                    const auto fi=first[i];
+                    cj[i]=fi<i?m.sub(x[i*n+j],m.dot(&l[i*n+fi],&cj[fi],i-fi)):x[i*n+j];
+                }
+            }
+            return true;
+        }
         // The work of one modulus, shared by the oracle and Chinese remaindering: the same residues
-        // as reference_characteristic, from B = (E^-1 F)^T, its Hessenberg form and the determinant
-        // recurrence.
-        bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,bool diagonal_e,Word p,std::vector<Word>& q,
+        // as reference_characteristic. The general route forms B = (E^-1 F)^T, its Hessenberg form and
+        // the determinant recurrence; the symmetric routes of the plan reach a pencil (D, S), D diagonal
+        // and S symmetric, and run Lanczos on it. A zero LDL^T pivot falls back to the general route, a
+        // Lanczos breakdown to the Hessenberg form of D^-1 S.
+        bool modular_characteristic(const ZMatrix& e,const ZMatrix& f,const ResiduePlan& plan,Word p,std::vector<Word>& q,
                                     ResidueWorkspace& ws) {
+            using Route=ResiduePlan::Route;
             const Montgomery m(p);
             const auto n=e.n;
             Word det_e=0;
-            if(!transposed_quotient(e,f,diagonal_e,m,ws,det_e))return false;
+            bool formed=false;
+            if(plan.route==Route::lanczos) {
+                // d and 1/d by the batch inversion of transposed_quotient; S = F on the rows' ranges.
+                auto& d=ws.factor;
+                auto& inverse=ws.inverse;
+                d.resize(n);
+                inverse.resize(n);
+                det_e=m.to(1);
+                for(std::size_t i=0;i<n;++i) {
+                    d[i]=scaled_residue(e(i,i),m.r2,m);
+                    if(d[i]==0)return false;
+                    det_e=m.mul(det_e,d[i]);
+                    inverse[i]=det_e;
+                }
+                Word all=m.inverse(det_e);
+                for(std::size_t i=n;i-->1;) {
+                    inverse[i]=m.mul(all,inverse[i-1]);
+                    all=m.mul(all,d[i]);
+                }
+                inverse[0]=all;
+                const auto& first=plan.first;
+                const auto& last=plan.last;
+                bool done=false;
+                if(plan.sparse) {
+                    const auto& start=plan.start;
+                    const auto* column=plan.column.data();
+                    auto& values=ws.s;
+                    values.resize(plan.column.size());
+                    for(std::size_t i=0;i<n;++i)
+                        for(std::size_t t=start[i];t<start[i+1];++t)values[t]=scaled_residue(f(i,column[t]),m.r2,m);
+                    done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
+                        for(std::size_t i=0;i<n;++i)out[i]=m.dot(v,column+start[i],values.data()+start[i],start[i+1]-start[i]);
+                    },ws,q);
+                }
+                else {
+                    // Row i past the diagonal is zero unless a later row's range reaches column i.
+                    auto& s=ws.b;
+                    s.resize(n*n);
+                    for(std::size_t i=0;i<n;++i) {
+                        std::fill(s.begin()+static_cast<std::ptrdiff_t>(i*n+i+1),s.begin()+static_cast<std::ptrdiff_t>(i*n+last[i]),0);
+                        for(std::size_t j=first[i];j<=i;++j)s[i*n+j]=s[j*n+i]=scaled_residue(f(i,j),m.r2,m);
+                    }
+                    done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
+                        for(std::size_t i=0;i<n;++i)out[i]=m.dot(&s[i*n+first[i]],v+first[i],last[i]-first[i]);
+                    },ws,q);
+                }
+                if(done) {
+                    ++ws.routes.lanczos;
+                    for(auto& c:q)c=m.from(m.mul(det_e,c));
+                    return true;
+                }
+                ++ws.routes.breakdown_fallbacks;
+            }
+            else if(plan.route==Route::congruence) {
+                if(symmetric_congruence(e,f,plan,m,ws,det_e)) {
+                    auto& c=ws.b;
+                    const auto& inverse=ws.inverse;
+                    // C is dense unless E^-1 is sparse (E block diagonal): its rows' nonzero ranges.
+                    auto& first=ws.first;
+                    auto& last=ws.last;
+                    first.resize(n);
+                    last.resize(n);
+                    for(std::size_t i=0;i<n;++i) {
+                        const Word* ci=&c[i*n];
+                        std::size_t a=0,b=n;
+                        while(a<i&&ci[a]==0)++a;
+                        while(b>i+1&&ci[b-1]==0)--b;
+                        first[i]=a;
+                        last[i]=b;
+                    }
+                    const bool done=lanczos(n,m,inverse.data(),[&](const Word* v,Word* out) {
+                        for(std::size_t i=0;i<n;++i)out[i]=m.dot(&c[i*n+first[i]],v+first[i],last[i]-first[i]);
+                    },ws,q);
+                    if(done) {
+                        ++ws.routes.congruence;
+                        for(auto& v:q)v=m.from(m.mul(det_e,v));
+                        return true;
+                    }
+                    ++ws.routes.breakdown_fallbacks;
+                    // B = (D^-1 C)^T: b[j*n+i] = C_ij/d_i, C symmetric.
+                    for(std::size_t j=0;j<n;++j)for(std::size_t i=0;i<n;++i)c[j*n+i]=m.mul(c[j*n+i],inverse[i]);
+                    formed=true;
+                }
+                else ++ws.routes.pivot_fallbacks;
+            }
+            if(!formed&&!transposed_quotient(e,f,plan.diagonal_e,m,ws,det_e))return false;
             dense_hessenberg(ws.b,n,m,sparse_hessenberg(ws.b,n,m,ws),ws);
             hessenberg_determinant(n,m,ws,q);
             for(auto& c:q)c=m.from(m.mul(det_e,c));
             return true;
+        }
+        // Products of the general route modulo p for E diagonal, from one run of its sparse reduction:
+        // that reduction as counted while it runs, its dense completion from column s as 5/6 (n-s)^3
+        // products, then the dot products of the determinant recurrence on the zero pattern of H, with
+        // the columns from s full and their subdiagonal nonzero. Stops once above `budget`; nullopt when
+        // p divides det(E).
+        std::optional<std::size_t> general_work(const ZMatrix& e,const ZMatrix& f,Word p,std::size_t budget) {
+            const Montgomery m(p);
+            const auto n=e.n;
+            ResidueWorkspace ws;
+            Word det_e=0;
+            if(!transposed_quotient(e,f,true,m,ws,det_e))return std::nullopt;
+            std::size_t work=0;
+            const auto s=sparse_hessenberg(ws.b,n,m,ws,&work,budget);
+            if(work>budget)return work;
+            work+=5*(n-s)*(n-s)*(n-s)/6;
+            const auto& h=ws.b;
+            auto nonzero=[&](std::size_t i,std::size_t k) {
+                return k>=s?i<=k+1:h[i*n+k]!=0;
+            };
+            // As hessenberg_determinant: g_t for t in [low, k), low above the first zero subdiagonal.
+            for(std::size_t k=1;k<=n;++k) {
+                std::size_t top=0,low=k-1,count=0,weighted=0;
+                while(top<k&&!nonzero(top,k-1))++top;
+                if(top<k)for(std::size_t t=k-1;t-->top&&nonzero(t+1,t);)low=t;
+                for(std::size_t t=low;t<k;++t)if(nonzero(t,k-1)) {
+                    ++count;
+                    weighted+=t+1;
+                }
+                work+=2*count<k-low?weighted:low*(k-low)+(k-low)*(k-low+1)/2;
+            }
+            return work;
+        }
+        // The route of a pencil: general unless E and F are symmetric; congruence for E not diagonal;
+        // for E diagonal Lanczos, except that the fast kernel keeps the general route for a tridiagonal F
+        // and when one modulus shows it cheaper (general_work against an estimate of Lanczos).
+        ResiduePlan residue_plan(const ZMatrix& e,const ZMatrix& f,ResidueKernel kernel) {
+            ResiduePlan plan;
+            plan.diagonal_e=diagonal(e);
+            if(kernel==ResidueKernel::general||kernel==ResidueKernel::reference||!(plan.diagonal_e||symmetric(e))||!symmetric(f))
+                return plan;
+            const auto n=e.n;
+            const ZMatrix& a=plan.diagonal_e?f:e;
+            plan.first.resize(n);
+            plan.last.resize(n);
+            for(std::size_t i=0;i<n;++i) {
+                std::size_t first=0,last=n;
+                while(first<i&&a(i,first)==0)++first;
+                while(last>i+1&&a(i,last-1)==0)--last;
+                plan.first[i]=first;
+                plan.last[i]=last;
+            }
+            if(!plan.diagonal_e) {
+                plan.route=ResiduePlan::Route::congruence;
+                return plan;
+            }
+            // A tridiagonal F makes B tridiagonal, already Hessenberg, with O(n^2) for its determinant.
+            std::size_t range=0,nonzero=0;
+            bool tridiagonal=true;
+            for(std::size_t i=0;i<n;++i) {
+                range+=plan.last[i]-plan.first[i];
+                tridiagonal&=plan.first[i]+1>=i&&plan.last[i]<=i+2;
+                for(std::size_t j=plan.first[i];j<plan.last[i];++j)nonzero+=f(i,j)!=0;
+            }
+            if(kernel==ResidueKernel::fast&&tridiagonal)return plan;
+            plan.route=ResiduePlan::Route::lanczos;
+            plan.sparse=2*nonzero<range;
+            if(plan.sparse) {
+                plan.start.assign(1,0);
+                for(std::size_t i=0;i<n;++i) {
+                    for(std::size_t j=plan.first[i];j<plan.last[i];++j)if(f(i,j)!=0)plan.column.push_back(static_cast<std::uint32_t>(j));
+                    plan.start.push_back(plan.column.size());
+                }
+            }
+            // Lanczos costs n products with F of `terms` each, plus per step vector work and short-row
+            // overheads worth about 20 n products. Rows mostly full make the general reduction dense at
+            // once; otherwise one modulus measures the general route, whose Hessenberg form stays sparse
+            // for some banded pencils (D-rot) and fills for others.
+            const std::size_t terms=plan.sparse?nonzero:range,lanczos_work=n*(terms+20*n);
+            if(kernel==ResidueKernel::fast&&2*range<n*n) {
+                for(std::size_t i=0;i<4;++i) {
+                    const auto work=general_work(e,f,prime_at(i),lanczos_work);
+                    if(!work)continue;
+                    if(*work<=lanczos_work)plan.route=ResiduePlan::Route::general;
+                    break;
+                }
+            }
+            return plan;
         }
         // The batch that would bring `proven_bits` to `need_bits` if every modulus in it is usable.
         std::vector<Word> prime_batch(std::size_t proven_bits,std::size_t need_bits,std::size_t& next_prime) {
@@ -1060,7 +1390,7 @@ namespace secular {
             // and 61k >= bits(need) gives a product above need.
             const std::size_t need_bits=bits(need);
             if(bareiss_clearly_cheaper(e,f,c,need_bits))return out;
-            const bool diagonal_e=diagonal(e);
+            const auto plan=residue_plan(e,f,ResidueKernel::fast);
             constexpr unsigned char unusable=0,match=1,mismatch=2;
             std::size_t proven_bits=0,next_prime=0,unusable_count=0;
             std::optional<Team> team;
@@ -1075,7 +1405,7 @@ namespace secular {
                 std::vector<unsigned char> outcome(batch.size(),unusable);
                 team->run(batch.size(),[&](std::size_t index,unsigned slot) {
                     std::vector<Word> q;
-                    if(!modular_characteristic(e,f,diagonal_e,batch[index],q,workspaces[slot]))return;
+                    if(!modular_characteristic(e,f,plan,batch[index],q,workspaces[slot]))return;
                     for(std::size_t k=0;k<=n;++k)if(residue(c[k],batch[index])!=q[k]) {
                         outcome[index]=mismatch;
                         return;
@@ -1785,13 +2115,15 @@ namespace secular {
         // The residues are those of the reduced pencil E' = P^-1 E P^-1/alpha, F' = P^-1 F P^-1/beta,
         // whose coefficients c' give q_k = f_k c'_k (graded_factors). Both |c'_k| <= B'_k, the bound of
         // the reduced pencil, and |c'_k| = |q_k|/f_k <= floor(B_k/f_k) hold; their minimum b_k decides.
-        // The original pencil's bound is independent of the reduction and of the reduced pencil's
-        // bound, so with more than one worker it runs on a helper thread beside them.
+        // The original pencil's bound is independent of the reduction, the reduced pencil's bound and
+        // the residue plan, so with more than one worker it runs on a helper thread beside them.
         PencilReduction reduction;
         std::vector<Z> bound,reduced;
+        ResiduePlan plan;
         auto reduce=[&] {
             reduction=reduce_pencil(e,f);
             if(!reduction.trivial)reduced=identity_bound(reduction.E,reduction.F);
+            plan=residue_plan(reduction.E,reduction.F,ResidueKernel::fast);
         };
         if(oracle_worker_count(requested,2)>1) {
             std::exception_ptr helper_error;
@@ -1823,7 +2155,6 @@ namespace secular {
         }
         // |c'_m| <= b_m < M/2 once M > 2*max_m b_m; 61k >= bits(max b)+1 ensures it for k moduli.
         const std::size_t need_bits=bits(*std::max_element(bound.begin(),bound.end()))+1;
-        const bool diagonal_e=diagonal(re);
         CoefficientResult r;
         r.bound_bits=need_bits-1;
         r.reduced=!reduction.trivial;
@@ -1841,7 +2172,7 @@ namespace secular {
             std::vector<std::vector<Word>> found(batch.size());
             std::vector<unsigned char> usable(batch.size(),0);
             team->run(batch.size(),[&](std::size_t index,unsigned slot) {
-                usable[index]=modular_characteristic(re,rf,diagonal_e,batch[index],found[index],workspaces[slot]);
+                usable[index]=modular_characteristic(re,rf,plan,batch[index],found[index],workspaces[slot]);
             });
             for(std::size_t index=0;index<batch.size();++index) {
                 if(!usable[index]) {
@@ -2058,26 +2389,28 @@ namespace secular {
     }
     std::vector<std::optional<std::vector<std::uint64_t>>> pencil_residues(const ZMatrix& e,const ZMatrix& f,
                                                                            const std::vector<std::uint64_t>& primes,
-                                                                           ResidueKernel kernel) {
+                                                                           ResidueKernel kernel,ResidueRoutes* routes) {
         if(e.n==0||e.n>max_dimension||e.n!=f.n||e.data.size()!=e.n*e.n||f.data.size()!=e.n*e.n)
             throw std::invalid_argument("invalid pencil storage");
 #ifdef SECULAR_MODULAR_ORACLE
         for(const auto p:primes)
             if(p<3||p%2==0||p>=(Word(1)<<62)||!proven_prime(p))throw std::invalid_argument("modulus must be an odd prime below 2^62");
-        const bool diagonal_e=diagonal(e);
+        const auto plan=residue_plan(e,f,kernel);
         std::vector<std::optional<std::vector<std::uint64_t>>> out;
         out.reserve(primes.size());
         ResidueWorkspace workspace;
         for(const auto p:primes) {
             std::vector<Word> q;
-            const bool usable=kernel==ResidueKernel::reference?reference_characteristic(e,f,diagonal_e,p,q):
-                              modular_characteristic(e,f,diagonal_e,p,q,workspace);
+            const bool usable=kernel==ResidueKernel::reference?reference_characteristic(e,f,plan.diagonal_e,p,q):
+                              modular_characteristic(e,f,plan,p,q,workspace);
             out.push_back(usable?std::optional(std::move(q)):std::nullopt);
         }
+        if(routes)*routes=workspace.routes;
         return out;
 #else
         (void)primes;
         (void)kernel;
+        (void)routes;
         throw std::logic_error("modular oracle requires 64-bit GMP limbs and 128-bit integers");
 #endif
     }
