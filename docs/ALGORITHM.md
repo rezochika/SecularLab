@@ -150,9 +150,13 @@ the general route.
 The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
 time in 128 bits, then into 192 bits, and reduced once per dot product, and fixed multipliers use
 Shoup's precomputed quotient. So nearly every product is one 64x64-bit multiplication and an
-addition. The tests check every route against the plain Gauss-Jordan and Hessenberg reduction the
-kernel replaced, on random and structured pencils and on small primes, where zero pivots, Lanczos
-breakdowns and det E = 0 modulo p are common, and force each fallback at the large primes.
+addition. Subtraction modulo p is a conditional move rather than a branch, which would mispredict
+half the time on residues: it adds p under the borrow's mask, except where a row of a substitution
+ends on its dot product with the rows before, which arrives last; there it picks between a-b and
+(a+p)-b, one cycle sooner. The tests check every route against the plain Gauss-Jordan and
+Hessenberg reduction the kernel replaced, on random and structured pencils and on small primes,
+where zero pivots, Lanczos breakdowns and det E = 0 modulo p are common, and force each fallback
+at the large primes.
 
 Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
 determinant bounds every true coefficient by the corresponding coefficient B_m of

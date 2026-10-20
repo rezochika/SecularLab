@@ -381,8 +381,21 @@ namespace secular {
                 const Word s=a+b;
                 return s>=p?s-p:s;
             }
+            // a - b, plus p where it wraps. The mask keeps it a cmov: as a conditional expression GCC
+            // 15 -O3 branched on a < b, which mispredicts about half the time on residues.
             Word sub(Word a,Word b)const {
-                return a>=b?a-b:a+p-b;
+                const Word d=a-b;
+                return d+(p&(0-Word(a<b)));
+            }
+            // sub() closing a row of a substitution, whose b (a dot product with the rows before) is
+            // ready last: the cmov picks a - b or (a + p) - b, two cycles after b where the mask takes
+            // three, for one more instruction. The empty asm keeps a + p unconditional, which GCC would
+            // otherwise sink into a branch.
+            Word sub_chained(Word a,Word b)const {
+                Word e=a+p;
+                asm("":"+r"(e));
+                e-=b;
+                return a<b?e:a-b;
             }
             Word power(Word a,Word exponent)const {
                 Word result=to(1);
@@ -770,10 +783,10 @@ namespace secular {
                 if(zero==n)continue;
                 for(std::size_t k=zero;k<n;++k) {
                     const auto s=std::max(first[k],zero);
-                    const Word t=s<k?m.sub(x[row[k]],m.dot(&w[k*n+s],&y[s],k-s)):x[row[k]];
+                    const Word t=s<k?m.sub_chained(x[row[k]],m.dot(&w[k*n+s],&y[s],k-s)):x[row[k]];
                     y[k]=m.mul(t,inverse[k]);
                 }
-                for(std::size_t k=n;k-->0;)x[k]=last[k]>k?m.sub(y[k],m.dot(&u[k*n+k+1],&x[k+1],last[k]-k)):y[k];
+                for(std::size_t k=n;k-->0;)x[k]=last[k]>k?m.sub_chained(y[k],m.dot(&u[k*n+k+1],&x[k+1],last[k]-k)):y[k];
             }
             return true;
         }
@@ -855,7 +868,7 @@ namespace secular {
             for(std::size_t j=start;j<n;++j) {
                 for(std::size_t q=0;q<n;++q)w[q]=m.dot(&b[q*n+j],&v[j],n-j);
                 Word* h=&hc[j*n];
-                for(std::size_t i=0;i<=j;++i)h[i]=i>start?m.sub(w[i],m.dot(&l[i*n+start],&h[start],i-start)):w[i];
+                for(std::size_t i=0;i<=j;++i)h[i]=i>start?m.sub_chained(w[i],m.dot(&l[i*n+start],&h[start],i-start)):w[i];
                 if(j+1==n)break;
                 // w becomes r on rows j+1..n-1.
                 for(std::size_t k=j+1;k<n;++k)w[k]=m.sub(w[k],m.dot(&l[k*n+start],&h[start],j+1-start));
@@ -1053,14 +1066,14 @@ namespace secular {
             auto back=[&](Word* x) {
                 for(std::size_t i=n;i-->0;) {
                     const Word z=m.mul(x[i],inverse_d[i]);
-                    x[i]=reach[i]>i+1?m.sub(z,m.dot(lt+i*n+i+1,x+i+1,reach[i]-i-1)):z;
+                    x[i]=reach[i]>i+1?m.sub_chained(z,m.dot(lt+i*n+i+1,x+i+1,reach[i]-i-1)):z;
                 }
             };
             // q_(-1) = u_(-1) = 0.
             lanczos_start(n,m,u);
             for(std::size_t i=0;i<n;++i) {
                 const auto s=profile[i];
-                q[i]=s<i?m.sub(u[i],m.dot(l+i*n+s,q+s,i-s)):u[i];
+                q[i]=s<i?m.sub_chained(u[i],m.dot(l+i*n+s,q+s,i-s)):u[i];
                 q0[i]=u0[i]=0;
             }
             back(q);
@@ -1079,7 +1092,7 @@ namespace secular {
                     const Word next=m.sub(w[i],m.reduce(Wide(a)*u[i]+Wide(b)*u0[i]));
                     u0[i]=next;
                     const auto s=profile[i];
-                    q0[i]=s<i?m.sub(next,m.dot(l+i*n+s,q0+s,i-s)):next;
+                    q0[i]=s<i?m.sub_chained(next,m.dot(l+i*n+s,q0+s,i-s)):next;
                 }
                 back(q0);
                 std::swap(q,q0);
@@ -1113,7 +1126,7 @@ namespace secular {
                 for(std::size_t t=fi;t<i;++t) {
                     const auto s=std::max(fi,first[t]);
                     const Word entry=scaled_residue(e(i,t),m.r2,m);
-                    w[t]=s<t?m.sub(entry,m.dot(&w[s],&l[t*n+s],t-s)):entry;
+                    w[t]=s<t?m.sub_chained(entry,m.dot(&w[s],&l[t*n+s],t-s)):entry;
                     li[t]=m.mul(w[t],inverse[t]);
                 }
                 const Word entry=scaled_residue(e(i,i),m.r2,m);
@@ -1174,7 +1187,7 @@ namespace secular {
                 for(std::size_t t=0;t<j;++t)cj[t]=c[t*n+j];
                 for(std::size_t i=j;i<n;++i) {
                     const auto fi=first[i];
-                    cj[i]=fi<i?m.sub(x[i*n+j],m.dot(&l[i*n+fi],&cj[fi],i-fi)):x[i*n+j];
+                    cj[i]=fi<i?m.sub_chained(x[i*n+j],m.dot(&l[i*n+fi],&cj[fi],i-fi)):x[i*n+j];
                 }
             }
             return true;
