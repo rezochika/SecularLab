@@ -124,12 +124,32 @@ namespace secular {
         // descending powers, actual signs: det(zE-F)
         std::size_t exact_divisions {},max_coefficient_bits {},max_workspace_bits {};
         bool terminal_zero {};
-        // Threads that computed the rows of each recurrence stage.
+        // Threads that computed the rows of each recurrence stage, or the residues of crt_characteristic.
         unsigned workers {};
+        // crt_characteristic only: primes whose residues were combined, and primes skipped
+        // because they divide det(E'); the bits of the coefficient bound that set their number,
+        // and whether the pencil was reduced (E' != E).
+        std::size_t moduli {},skipped_moduli {},bound_bits {};
+        bool reduced {};
     };
     // Workers as for oracle_worker_count, clamped to the n rows of a stage.
     // Every worker count gives identical results.
     CoefficientResult characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
+    // det(zE-F) by Chinese remaindering the residues that the modular oracle computes, taken on the
+    // reduce_pencil() reduction (E',F'): det(E') det(zI-E'^-1 F') modulo oracle primes not dividing
+    // det(E'), until their product M exceeds twice every bound b_m on the reduced coefficients c'_m.
+    // b_m is the smaller of the reduced pencil's coefficient bound and floor(B_m/f_m), with B_m the
+    // bound of the original pencil and q_m = f_m c'_m. The symmetric residue modulo M is then c'_m
+    // itself, so the result is proven as the oracle proves a given vector, and q_m = f_m c'_m by
+    // exact multiplication. The same integers as characteristic(); no recurrence statistic is
+    // filled. Throws std::invalid_argument for a singular E, as characteristic() does, once the
+    // skipped primes prove det(E')=0. Workers as for oracle_worker_count, clamped to the first
+    // batch of primes. Requires the modular oracle (64-bit GMP limbs and 128-bit integers);
+    // otherwise throws std::logic_error.
+    CoefficientResult crt_characteristic(const ZMatrix& e,const ZMatrix& f,unsigned workers=1);
+    // The positive gcd of the coefficients, 1 for a zero vector. q/content has the same roots,
+    // and the same signs everywhere.
+    Z polynomial_content(const std::vector<Z>& coefficients);
     // An exact diagonal congruence and content reduction: E = alpha*P*E'*P and F = beta*P*F'*P,
     // with P = diag(scale) and every scale entry a product of powers of 2 and 5. Then
     // det(zE-F) = prod(scale)^2 * sum_k c'_k alpha^(n-k) beta^k z^(n-k), where c' are the
@@ -213,5 +233,31 @@ namespace secular {
     // The index-th prime of the fixed descending sequence of proven primes below 2^62
     // used by the modular oracle (index 0 is the largest).
     std::uint64_t oracle_prime(std::size_t index);
+    // Implementations of the residue kernel behind the modular oracle and crt_characteristic.
+    // Every residue is a field computation modulo p, so all give the same residues; `reference`
+    // is the plain Gauss-Jordan and Hessenberg reduction kept to test the others against. `fast`
+    // is what the oracle and crt_characteristic run; `general` never takes the symmetric routes,
+    // and `symmetric` takes them for every pencil with E and F symmetric, however sparse.
+    enum class ResidueKernel {
+        fast,reference,general,symmetric
+    };
+    // How the residues of pencil_residues were formed, one count per modulus.
+    struct ResidueRoutes {
+        // Lanczos residues of E diagonal and F symmetric.
+        std::size_t lanczos=0;
+        // Lanczos residues after E = LDL^T and C = L^-1 F L^-T.
+        std::size_t congruence=0;
+        // LDL^T met a zero pivot; the general route followed.
+        std::size_t pivot_fallbacks=0;
+        // Lanczos broke down; the Hessenberg form of D^-1 S followed.
+        std::size_t breakdown_fallbacks=0;
+    };
+    // det(zE-F) modulo each odd prime p < 2^62 in descending powers, as residues below p, or nullopt
+    // when p divides det(E). One workspace serves every prime, as in the oracle. Exposed for tests and
+    // benchmarks. Requires the modular oracle.
+    std::vector<std::optional<std::vector<std::uint64_t>>> pencil_residues(const ZMatrix& e,const ZMatrix& f,
+                                                                           const std::vector<std::uint64_t>& primes,
+                                                                           ResidueKernel kernel=ResidueKernel::fast,
+                                                                           ResidueRoutes* routes=nullptr);
     bool has_repeated_roots(const std::vector<Z>& coefficients);
 }

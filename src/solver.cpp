@@ -443,19 +443,58 @@ namespace secular {
         bool valid_matrix_shapes(const QMatrix& k,const QMatrix& m) {
             return k.n>0&&k.n<=max_dimension&&k.n==m.n&&k.data.size()==k.n*k.n&&m.data.size()==m.n*m.n;
         }
+        std::vector<Z> divide_content(const std::vector<Z>& c,const Z& content) {
+            std::vector<Z> out(c.size());
+            for(std::size_t i=0;i<c.size();++i)mpz_divexact(out[i].get_mpz_t(),c[i].get_mpz_t(),content.get_mpz_t());
+            return out;
+        }
         void compute_coefficients(const IntegerPencil& p,const Options& o,SolveResult& out,bool verify) {
-            if(o.progress)o.progress("Computing exact characteristic coefficients...");
+            const bool recurrence=o.coefficient_method!=CoefficientMethod::crt;
+            const bool crt=o.coefficient_method!=CoefficientMethod::recurrence;
+            if(crt&&!verify)throw std::invalid_argument("Chinese remaindering proves the coefficients; it cannot run unchecked");
+            out.coefficient_method=!crt?"recurrence":recurrence?"both":"crt";
+            if(o.progress)o.progress(!crt?"Computing exact characteristic coefficients...":
+                recurrence?"Computing exact characteristic coefficients by the recurrence and by Chinese remaindering...":
+                "Computing exact characteristic coefficients by Chinese remaindering modulo proven primes...");
             auto timer=Clock::now();
-            // The recurrence runs on an exactly reduced pencil and maps its coefficients back;
-            // the oracle below still checks them against the original pencil.
-            auto c=reduced_characteristic(p.E,p.F,o.oracle_workers);
-            out.coefficients_seconds=elapsed(timer);
+            CoefficientResult c;
+            if(recurrence) {
+                // The recurrence runs on an exactly reduced pencil and maps its coefficients back;
+                // the oracle below still checks them against the original pencil.
+                c=reduced_characteristic(p.E,p.F,o.oracle_workers);
+                out.exact_divisions=c.exact_divisions;
+                out.max_workspace_bits=c.max_workspace_bits;
+                out.recurrence_workers=c.workers;
+            }
+            if(crt) {
+                const auto crt_timer=Clock::now();
+                auto remaindered=crt_characteristic(p.E,p.F,o.oracle_workers);
+                out.crt_seconds=elapsed(crt_timer);
+                if(recurrence&&remaindered.coefficients!=c.coefficients)
+                    throw std::logic_error("N-version coefficient check failed: the recurrence and Chinese remaindering differ");
+                // Residues of the reduced pencil modulo primes whose product exceeds twice every bound
+                // on its coefficients prove them, as they prove a given vector in the modular oracle;
+                // q = det(zE-F) follows by the exact graded map back.
+                out.coefficient_moduli=remaindered.moduli;
+                out.crt_workers=remaindered.workers;
+                out.crt_bound_bits=remaindered.bound_bits;
+                out.crt_reduced=remaindered.reduced;
+                out.coefficient_identity_verified=true;
+                out.coefficient_oracle="crt";
+                out.oracle_moduli=remaindered.moduli;
+                out.oracle_workers=remaindered.workers;
+                if(!recurrence)c=std::move(remaindered);
+            }
             out.coefficients=std::move(c.coefficients);
-            out.exact_divisions=c.exact_divisions;
             out.max_coefficient_bits=c.max_coefficient_bits;
-            out.max_workspace_bits=c.max_workspace_bits;
-            out.recurrence_workers=c.workers;
-            if(verify) {
+            out.coefficient_content=polynomial_content(out.coefficients);
+            out.primitive_coefficient_bits_max=0;
+            for(const auto& v:divide_content(out.coefficients,out.coefficient_content))
+                out.primitive_coefficient_bits_max=std::max(out.primitive_coefficient_bits_max,bits(v));
+            out.coefficients_seconds=elapsed(timer);
+            // The recurrence is checked by the oracle; Chinese remaindering only by an explicit
+            // Bareiss request, since the modular oracle would recompute the residues it combined.
+            if(verify&&(!crt||o.coefficient_oracle==CoefficientOracle::bareiss)) {
                 if(o.progress)o.progress(o.coefficient_oracle==CoefficientOracle::bareiss?
                     "Checking polynomial at n+1 independent Bareiss determinants...":
                     "Checking polynomial against det(zE-F) modulo proven primes...");
@@ -469,9 +508,14 @@ namespace secular {
                 if(!out.coefficient_identity_verified)throw std::logic_error("independent determinant verification failed");
             }
         }
-        bool repeated_spectrum(SolveResult& out) {
+        // The polynomial the Graeffe, squarefree and sign stages use: q, or q/content(q) on request.
+        std::vector<Z> stage_polynomial(const Options& o,SolveResult& out) {
+            out.content_removed=o.remove_content;
+            return o.remove_content?divide_content(out.coefficients,out.coefficient_content):out.coefficients;
+        }
+        bool repeated_spectrum(const std::vector<Z>& polynomial,SolveResult& out) {
             auto timer=Clock::now();
-            auto squarefree=check_squarefree(out.coefficients);
+            auto squarefree=check_squarefree(polynomial);
             out.squarefree_seconds=elapsed(timer);
             out.squarefree_modular_prime=squarefree.modular_prime;
             return squarefree.repeated;
@@ -672,6 +716,15 @@ namespace secular {
     void validate_options(const Options& o) {
         if(o.digits<1||o.digits>1000||o.precision<32||o.max_precision<o.precision||o.max_precision>20000||o.max_squarings<1||o.max_squarings>512)throw std::invalid_argument("invalid resource limits (digits 1..1000, precision 32..20000, squarings 1..512)");
         if(o.oracle_workers>64)throw std::invalid_argument("oracle workers must be 0..64");
+        if(o.coefficient_method!=CoefficientMethod::recurrence&&!o.full_coefficient_check)
+            throw std::invalid_argument("Chinese remaindering proves the coefficients; it cannot run unchecked");
+    }
+    SolveResult exact_coefficients(const IntegerPencil& p,const Options& o,bool check) {
+        SolveResult out;
+        out.order=p.E.n;
+        out.determinant_scale=p.scale;
+        compute_coefficients(p,o,out,check);
+        return out;
     }
     SolveResult solve(const QMatrix& k,const QMatrix& m,const Options& o) {
         auto begin=Clock::now();
@@ -688,14 +741,15 @@ namespace secular {
         if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("root recovery currently requires positive definite K (positive eigenvalues)");
         out.initialization_seconds=elapsed(begin);
         compute_coefficients(p,o,out,o.full_coefficient_check);
-        if(o.check_squarefree&&repeated_spectrum(out)) {
+        const auto polynomial=stage_polynomial(o,out);
+        if(o.check_squarefree&&repeated_spectrum(polynomial,out)) {
             out.status="REPEATED_SPECTRUM";
             out.message="Exact polynomial gcd detects a repeated root; simple-root Graeffe certification is not applicable.";
             out.total_seconds=elapsed(begin);
             return out;
         }
         // Signs of the fixed coefficient vector; its scaled tables serve every attempt.
-        SignEvaluator signs(out.coefficients);
+        SignEvaluator signs(polynomial);
         const unsigned certification_workers=oracle_worker_count(o.oracle_workers,k.n);
         // Where the last exact-inertia pass stopped; the window starts at the largest root.
         std::size_t inertia_stop=0;
@@ -706,7 +760,7 @@ namespace secular {
             if(o.progress)o.progress("Graeffe candidate pass at "+std::to_string(work)+" decimal working digits...");
             auto gt=Clock::now();
             try {
-                Graeffe graeffe(out.coefficients,graeffe_cut(work));
+                Graeffe graeffe(polynomial,graeffe_cut(work));
                 out.graeffe_unbounded_exponents=false;
                 const Real threshold("1e-"+std::to_string(o.digits+16));
                 std::vector<Real> previous;
@@ -794,17 +848,19 @@ namespace secular {
             ++out.inertia_evaluations;
             if(!check_positive_definite(p.F).positive_definite)throw std::invalid_argument("verification requires positive definite K");
             out.initialization_seconds=elapsed(begin);
+            std::vector<Z> polynomial;
             if(o.polynomial_certification) {
                 // Verification starts with the original matrices; neither saved
                 // coefficient files nor a previous status can authorize a proof.
                 compute_coefficients(p,o,out,true);
-                if(repeated_spectrum(out))throw std::invalid_argument("repeated spectrum cannot have a complete distinct-root certificate");
+                polynomial=stage_polynomial(o,out);
+                if(repeated_spectrum(polynomial,out))throw std::invalid_argument("repeated spectrum cannot have a complete distinct-root certificate");
             }
             auto timer=Clock::now();
             bool accepted=false;
             try {
                 // A fresh evaluator: no sign is carried over from an earlier computation.
-                SignEvaluator signs(out.coefficients);
+                SignEvaluator signs(polynomial);
                 bool row_failure=false;
                 if(o.polynomial_certification&&polynomial_rootset(roots,signs,k.n,digits,out,&row_failure)) {
                     accepted=true;
@@ -901,12 +957,21 @@ namespace secular {
            <<"  \"recurrence_workers\": "<<r.recurrence_workers<<",\n"
            <<"  \"coefficient_oracle\": \""<<r.coefficient_oracle<<"\",\n"
            <<"  \"oracle_moduli\": "<<r.oracle_moduli<<",\n"
+           <<"  \"coefficient_method\": \""<<r.coefficient_method<<"\",\n"
+           <<"  \"coefficient_moduli\": "<<r.coefficient_moduli<<",\n"
+           <<"  \"crt_workers\": "<<r.crt_workers<<",\n"
+           <<"  \"crt_bound_bits\": "<<r.crt_bound_bits<<",\n"
+           <<"  \"crt_reduced\": "<<(r.crt_reduced?"true":"false")<<",\n"
+           <<"  \"coefficient_content_bits\": "<<bits(r.coefficient_content)<<",\n"
+           <<"  \"primitive_coefficient_bits_max\": "<<r.primitive_coefficient_bits_max<<",\n"
+           <<"  \"content_removed\": "<<(r.content_removed?"true":"false")<<",\n"
            <<"  \"squarefree_modular_prime\": "<<r.squarefree_modular_prime<<",\n"
            <<"  \"polynomial_sign_evaluations\": "<<r.polynomial_sign_evaluations<<",\n"
            <<"  \"inertia_evaluations\": "<<r.inertia_evaluations<<",\n"
            <<"  \"certified_eigenvalues\": "<<r.roots.size()<<",\n"
            <<"  \"times_seconds\": {\"initialization\": "<<r.initialization_seconds
            <<", \"coefficients\": "<<r.coefficients_seconds
+           <<", \"crt\": "<<r.crt_seconds
            <<", \"coefficient_oracle\": "<<r.oracle_seconds
            <<", \"squarefree\": "<<r.squarefree_seconds
            <<", \"graeffe\": "<<r.graeffe_seconds

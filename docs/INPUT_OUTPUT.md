@@ -29,7 +29,8 @@ external oil-rig files are standard real-coordinate Matrix Market files.
   specialized matrix; these two files alone are sufficient for replay.
 - `command.txt`: invocation arguments and the exact specialized parameter, when present.
 - `coefficients.tsv`: descending exact integer coefficients of det(zLM-LK), including its
-  leading coefficient, with L identified in the comment.
+  leading coefficient, with L identified in the comment. The file is the same for every
+  `--coefficients` method, and with `--remove-content` it still holds q, not q/content(q).
 - `result.json`: status, counts, limits, backend and phase timings.
 - `eigenvalues.tsv`: written only on complete certification. Includes index, fixed-place
   decimal, exact rational lower/upper endpoints, and exact radius about that decimal.

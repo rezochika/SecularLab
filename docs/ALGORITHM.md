@@ -91,9 +91,52 @@ reduced stiffness entries fit one 64-bit limb.
 
 By default the result is then checked independently of the recurrence by a multimodular
 characteristic polynomial (`--oracle auto`). For a prime p not dividing det E, det(zE-F) =
-det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced to upper Hessenberg form by
-similarity, its characteristic polynomial follows from the Hessenberg recurrence, and all n+1
-coefficients of q, including q_0=det E, must match det(E) chi modulo p.
+det(E) det(zI-E^-1 F) holds over F_p. The residue of E^-1 F is reduced by similarity to upper
+Hessenberg form (or, for a symmetric pencil, to tridiagonal form, below), its characteristic
+polynomial follows from the Hessenberg recurrence, and all n+1 coefficients of q, including
+q_0=det E, must match det(E) chi modulo p.
+
+Every residue is a field computation modulo p, so any correct algorithm gives the same residues;
+the kernel is chosen for speed. It forms B = (E^-1 F)^T, which has the characteristic polynomial
+of E^-1 F. A diagonal E scales the nonzero entries of F after one batch inversion of its diagonal.
+A general E is factored PE = LU with partial pivoting in Crout order, and each column of F is
+solved by substitution, skipping the leading zeros of L, U and the right-hand side. B is reduced to
+upper Hessenberg form H by Gaussian similarity with pivoting, column by column through B L = L H
+with L unit lower triangular: column j of H solves a triangular system against B l_j, and the rest
+of that product gives l_(j+1). While the columns below the subdiagonal stay sparse, the classical
+elimination row r -= u_r row j+1, column j+1 += u_r column r runs instead and skips zero rows and
+columns; it hands over at the first column with more than a quarter of those entries nonzero.
+det(zI-H) then follows from the recurrence p_k = z p_(k-1) - sum_(s<k) g_s p_s, one dot product per
+coefficient.
+
+When E and F are both symmetric, which is decided once per pencil, two routes use the symmetry.
+A non-diagonal E is factored E = L D L^T without pivoting, L unit lower triangular, and the
+congruence C = L^-1 F L^-T gives det(zE-F) = det(zD-C) with C symmetric. The factor, the upper
+triangle of L^-1 F and the lower triangle of C take n^3/6 + n^3/6 + n^3/3 products, against
+n^3/3 + n^3 for LU and the solves, again skipping the leading zeros of the rows of E. The pencil
+(D, S), with D diagonal and S symmetric (S = C, or S = F when E is diagonal), then goes to Lanczos
+in the inner product <x,y> = x^T D y, for which D^-1 S is self-adjoint. From a fixed
+pseudo-random start, the recurrence q_(k+1) = D^-1 S q_k - alpha_k q_k - beta_k q_(k-1), with
+delta_k = <q_k,q_k>, alpha_k = q_k^T S q_k/delta_k and beta_k = delta_k/delta_(k-1), keeps the q_k
+pairwise D-orthogonal over any field while every delta_k is nonzero. After n steps they are a
+basis in which D^-1 S is tridiagonal, and p_(k+1) = (z-alpha_k) p_k - beta_k p_(k-1) gives its
+characteristic polynomial in O(n^2). Each step is one product with S and O(n) work, all in dot
+products. A vanishing delta_k is the exact breakdown: an invariant subspace or an isotropic vector,
+rare for 61-bit primes unless eigenvalues repeat, and common for small ones. That modulus then
+reduces D^-1 S to Hessenberg form instead. A zero LDL^T pivot, possible without p dividing det E,
+sends the modulus to the LU route. For a diagonal E and a sparse F, Lanczos costs about n(T+20n)
+products, with T the entries of F used per product: its nonzeros when they fill less than half of
+the rows' ranges, otherwise those ranges. The Hessenberg form of a banded F usually fills in, but
+exact cancellation can keep it sparse, as for the band-3 rotation pencil. So unless F's rows are
+mostly full, the sparse reduction runs once, for one prime, counting its products, and the pencil
+keeps the cheaper route.
+
+The arithmetic is Montgomery's: products below p^2 < 2^124 are summed sixteen at a
+time in 128 bits, then into 192 bits, and reduced once per dot product, and fixed multipliers use
+Shoup's precomputed quotient. So nearly every product is one 64x64-bit multiplication and an
+addition. The tests check every route against the plain Gauss-Jordan and Hessenberg reduction the
+kernel replaced, on random and structured pencils and on small primes, where zero pivots, Lanczos
+breakdowns and det E = 0 modulo p are common, and force each fallback at the large primes.
 
 Expanding det(zE-F) multilinearly in its rows and applying Hadamard's inequality to each mixed
 determinant bounds every true coefficient by the corresponding coefficient B_m of
@@ -119,6 +162,95 @@ the coefficient identity in exact arithmetic. Both oracles are formulations inde
 recurrence, not independent authorship or formal verification of the implementations.
 `--no-coefficient-check` skips the oracle; it never disables the recurrence's exact division and
 terminal-zero checks.
+
+### Coefficients by Chinese remaindering
+
+The oracle's work for one prime p already yields every coefficient of a pencil's determinant
+modulo p, as det(E) chi with chi the characteristic polynomial of E^-1 F.
+`--coefficients crt` keeps these residues and combines them instead of running the recurrence.
+It takes them on the reduced pencil (E'',F'') of the 2-adic and 5-adic reduction above. With
+f_k = alpha^(n-k) beta^k (prod_i p_i)^2 > 0, the identities there give q_k = f_k c''_k, where c''
+are the coefficients of det(zE''-F''). Each c''_k has two bounds. B''_k is the Hadamard-type
+bound of (E'',F''). Also |c''_k| = |q_k|/f_k <= B_k/f_k, and c''_k is an integer, so
+|c''_k| <= floor(B_k/f_k). Let b_k be the smaller of the two; for a trivial reduction b_k = B_k.
+
+Primes are taken from the same fixed sequence, skipping those dividing det E'', until k usable
+primes satisfy 61k >= bits(max_m b_m)+1. Their product M then exceeds 2 max_m b_m. For each m,
+Chinese remaindering gives the unique x_m with |x_m| <= (M-1)/2 that agrees with c''_m modulo
+every prime. Since |c''_m| <= b_m < M/2, x_m = c''_m. Then q_m = f_m x_m by integer multiplication
+alone. In the oracle's terms, M exceeds |x_m|+b_m <= M/2+b_m, and x agrees with det(E'') chi''
+modulo each prime, so the construction is itself the multimodular proof of c''. The reduction's
+identities make it a proof of q: E'' and F'' are formed by checked exact divisions, so
+E = alpha P E'' P and F = beta P F'' P hold exactly. Unlike the recurrence, whose result the
+oracle checks against the original (E,F), this proof uses the reduction; both are exact.
+Running the modular oracle afterwards would recompute residues of the same determinant, so
+`coefficient_oracle` reports `crt` and `oracle_moduli` the primes combined; `--oracle bareiss`
+still adds the n+1 Bareiss determinants of the original pencil. Skipped primes are counted as in
+the oracle: b_0 bounds |det E''|, and once bits(b_0)/61 primes are skipped, det E'' = 0 is
+proven, so det E = f_0 det E'' = 0. The request then fails with the recurrence's error for a
+singular leading matrix. Like the modular oracle, this route needs 64-bit GMP limbs and 128-bit
+integers.
+
+The reduction pays where q carries 2-adic and 5-adic structure. On the clustered A-mid4 pencil
+with gap 10^-100, q has 22145-bit coefficients and needed 364 primes; c'' is bounded by 2548 bits,
+and 42 primes suffice. The minimum matters: the reduced pencil's own bound B'' has 3202 bits there.
+On BCSSTK05 220 primes fall to 153, on the order-256 lumped Laplacian 73 fall to 8. Pencils
+without such structure, such as the dense congruences M = C^T C, keep their prime count. The
+original pencil's bound is computed on a helper thread beside the reduction, so the extra serial
+work is about one bound computation.
+
+The combination uses the weights w_i = (M/p_i)^-1 mod p_i, formed once with O(k^2) word
+operations. Each coefficient is then x = sum_i ((r_i w_i) mod p_i) M/p_i, summed up a product
+tree whose node with children (x_L,M_L), (x_R,M_R) holds x_L M_R + x_R M_L, and reduced modulo M
+into the symmetric range. Residues are computed one prime per worker, coefficients one per
+worker. No recurrence runs, so `exact_divisions`, `recurrence_workspace_bits_max` and
+`recurrence_workers` are zero; `coefficient_moduli` and `crt_workers` describe the combination,
+`crt_bound_bits` is bits(max_m b_m), and `crt_reduced` tells whether the reduction was nontrivial.
+The integers are those of the recurrence, so `coefficients.tsv` and the certificates are
+byte-identical.
+
+`--coefficients both` runs the recurrence and Chinese remaindering and requires identical
+integers: an N-version check of the two constructions, which share the input pencil, the exact
+reduction and GMP. The identity proof is the Chinese-remainder one. Both routes are themselves
+proofs, so they reject `--no-coefficient-check`; neither applies to formal affine coefficients.
+
+### Why the stopping point is a bound
+
+The primes follow a proven bound on c'', not the actual length of q or of q/content(q). An
+output-sensitive variant would reconstruct the monic polynomial chi = q/q_0 of E^-1 F, or the
+primitive part q/content(q), by rational reconstruction, and stop once the result is stable over a
+few extra primes. Stability is a heuristic, not a proof, and no cheaper proof is available here:
+
+- Residues alone prove a rational a/b only through a priori bounds. Two fractions with numerators
+  at most N and denominators at most D that agree modulo M are equal once M > 2ND. For
+  chi_k = q_k/q_0 the only a priori denominator bound is |det E|, and then ND is at least as long
+  as q_k itself.
+- Scaling a candidate back to q~ = (det E/lc) times the primitive part and running the modular
+  oracle needs 61k >= bits(max_m(|q~_m|+B_m)) >= bits(max_m B_m): the primes Chinese remaindering
+  uses anyway, which would leave nothing for the early stop to save.
+- Fewer primes need a proven common factor of the coefficients, which shortens what remains to be
+  proven. The reduction supplies such factors f_k. The rest of the content, for example
+  det(C)^2 for M = C^T C and K = C^T diag(lambda) C, would need its own certificate: determinantal
+  divisors of E and F, a Smith form of the pencil, or a factorization of det E. None is cheap in
+  general.
+
+On the 16 pencils of the FLINT/Arb comparison, max_m b_m exceeds the longest reduced coefficient
+by at most 206 bits, four primes, except for the dense range pencil of order 64 (13466 against
+7461 bits). There a spread spectrum makes Hadamard's inequality loose; a sharper proven bound
+would need eigenvalue information.
+
+### Content removal
+
+With decimal input, q = det(zE-F) usually carries a large content g = gcd(q_0,...,q_n): on
+BCSSTK05 g has 4387 bits, and q/g has 8778-bit coefficients against 13165 for q. Every
+`result.json` reports `coefficient_bits_max` (q), `primitive_coefficient_bits_max` (q/g) and
+`coefficient_content_bits`. `--remove-content` runs the squarefree test, the Graeffe stage and
+every polynomial sign on q/g. With g > 0, (q/g)(x) has the sign of q(x) at every rational x, so
+both have the same roots, brackets and singletons, and every acceptance test is unchanged.
+`coefficients.tsv` still holds q. The Graeffe mantissas of q/g round differently, so candidates
+may differ in their last working bits; proposal widths see them only through powers of ten and
+centers rounded at width+8 places, so certificates normally do not change. On the 16 pencils of
+the FLINT/Arb comparison they were byte-identical with and without `--remove-content`.
 
 Before recovery, squarefreeness is tested modulo the fixed primes 2, 3, 5, 7, 11, 65537, 2^31-1,
 2^32-5 and 2^32-17, in that order. A prime that keeps the degree and gives gcd(f, f') = 1 modulo p
@@ -420,7 +552,42 @@ bounds. Integer coefficient length, input denominators and elimination growth ca
 Symmetric pencils need about half of those operations, and the n rows of each stage are spread
 over the workers. The modular oracle needs O(n^3) word operations per prime, plus one pass over
 every entry and coefficient to form residues. The number of primes is about the bound's bit
-length divided by 61. The n+1 Bareiss determinants instead cost
+length divided by 61. Chinese remaindering needs the same residues for about as many primes,
+plus O(k^2) word operations for its weights and one product tree per coefficient, so it replaces
+the O(n^4) recurrence and the oracle by roughly the oracle's cost. On the 16 pencils of the
+FLINT/Arb comparison (Ryzen 9 7950X, Windows, CLion MinGW Release; medians), `--coefficients crt`
+cut total solve time by 1.2-364x on 32 threads and 1.2-141x on one thread, with byte-identical
+artifacts in all 277 runs. BCSSTK05 took 0.17 s instead of 0.52 s on 32 threads (1.25 s instead of
+4.8 s on one), the n=100 LU-mass pencil 0.08 s instead of 12.4 s (0.57 s instead of 70 s), and the
+dense mass of order 256 1.7 s instead of 602 s (16 s on one thread). Taking the residues on the
+reduced pencil, with the bound b of section 2, then cut the primes where q carries 2-adic and
+5-adic structure. In 192 further runs on the same pencils, again with byte-identical artifacts,
+the one-thread coefficient stage fell from 0.145 to 0.021 s on the A-mid4 pencil with gap
+10^-100 (364 to 42 primes), from 0.057 to 0.012 s with gap 10^-40 (155 to 26), from 0.29 to
+0.038 s on the lumped Laplacian of order 256 (73 to 8) and from 1.2 to 0.85 s on BCSSTK05 (220 to
+153). Pencils without that structure kept their primes and times within noise; the reduction
+then costs a few milliseconds of serial work. Total solve time changed less, because Graeffe and
+certification dominate there. The residue kernel of section 2 then cut the work per prime without
+changing a residue or the number of primes. On one thread, a prime took 7.9 ms instead of 48 ms on
+the order-256 pencil with a diagonal mass and a dense stiffness, and 0.41 ms instead of 2.2 ms on
+the dense order-64 pencil with a spread spectrum. In 192 further runs, again with byte-identical
+artifacts, the one-thread coefficient stage fell from 10.9 to 1.6 s and from 0.50 to 0.098 s on
+those two pencils, where FLINT's exact solve and characteristic polynomial take 4.25 s and 0.30 s;
+on 32 threads it fell from 0.55 to 0.13 s and from 0.032 to 0.013 s. The dense mass of order 256
+went from 15.6 to 1.9 s on one thread. Sparse pencils, whose reduction already skipped zeros,
+changed least: the band-3 rotation of order 256 from 0.14 to 0.10 s. The symmetric routes then
+cut the work per prime again on symmetric pencils, still without changing a residue or the number
+of primes. On one thread a prime took 11.9 ms instead of 17.8 ms on the dense mass of order 256,
+0.38 ms instead of 1.30 ms on BCSSTK05, 0.26 ms instead of 0.43 ms on the order-64 pencil and
+0.40 ms instead of 1.02 ms on the dense separated pencil of order 100, where C has short rows. The
+diagonal-mass pencil of order 256 gained least, 6.8 ms instead of 7.7 ms: Lanczos's products
+with a dense F are as many as the Hessenberg form and its recurrence take, only more regular. In
+192 further runs, again with byte-identical artifacts, the one-thread coefficient stage fell from
+0.233 to 0.075 s on BCSSTK05, from 1.91 to 1.26 s on the dense mass, from 0.101 to 0.064 s on the
+order-64 pencil and from 1.70 to 1.49 s on the diagonal-mass pencil; on 32 threads from 0.029 to
+0.017, 0.146 to 0.107, 0.014 to 0.013 and 0.140 to 0.119 s. The Laplacian and the rotation pencil
+keep the general route; deciding that costs the rotation pencil about 0.6 ms once, 1-3% of its
+one-thread stage. The n+1 Bareiss determinants instead cost
 O(n^4) integer operations on entries as long as the coefficients.
 Each Graeffe squaring costs O(n^2) exponent comparisons and one working-precision product,
 shift and addition per term that is not negligible. Recovering the candidates after r
@@ -452,3 +619,7 @@ otherwise. It excludes those inside Bareiss elimination, the reduction, the orac
 inertia routine.
 `coefficient_oracle` names the oracle that decided the identity, `oracle_moduli` the primes of a
 modular decision, and `oracle_workers` and `recurrence_workers` the threads actually used.
+`coefficient_method` is `recurrence`, `crt` or `both`; `coefficient_moduli`, `crt_workers`,
+`crt_bound_bits` and `crt_reduced` describe Chinese remaindering, and `times_seconds.crt` is its
+share of `times_seconds.coefficients`.
+`content_removed` tells whether the root stages used q/content(q).
